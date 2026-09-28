@@ -1,0 +1,130 @@
+name: hikari-etcd-stand
+
+# Один образ с etcdctl: и автосидинг конфига при up, и ручные правки из Makefile.
+x-etcdctl: &etcdctl
+  image: hikari-etcd/etcdctl:local
+  build: ./etcd
+  volumes:
+    - ./etcd:/seed:ro
+  environment:
+    ETCDCTL_ENDPOINTS: http://etcd:2379
+    ETCDCTL_API: "3"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-demo}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - log_min_duration_statement=500
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.15
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd=http://etcd:2380
+      - --initial-cluster-token=hikari-etcd-stand
+      - --initial-cluster-state=new
+      - --log-level=warn
+    ports:
+      - "${ETCD_PORT:-2379}:2379"
+      - "${ETCD_PEER_PORT:-2380}:2380"
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Раскладывает стартовый конфиг пула (идемпотентно) и выходит.
+  etcd-seed:
+    <<: *etcdctl
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      ETCDCTL_ENDPOINTS: http://etcd:2379
+      ETCDCTL_API: "3"
+      POOL_PREFIX: ${ETCD_PREFIX:-/config/pool-service/hikari/}
+      SEED_MAX_POOL_SIZE: ${SEED_MAX_POOL_SIZE:-10}
+    entrypoint: ["/bin/sh", "/seed/seed-config.sh"]
+    restart: "no"
+
+  service:
+    build: ./service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      etcd-seed:
+        condition: service_completed_successfully
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-demo}
+      DB_USER: ${POSTGRES_USER:-app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POOL_NAME: pool-service
+      POOL_MAX_SIZE: ${POOL_MAX_SIZE:-10}
+      # true = после расширения пула сразу открыть нужное число коннектов (демо).
+      # false = как в проде: коннекты добираются по мере надобности.
+      POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
+      # сколько ждать активные соединения при пересоздании пула (смена jdbcUrl/кредов)
+      POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
+      ETCD_ENDPOINTS: http://etcd:2379
+      ETCD_PREFIX: ${ETCD_PREFIX:-/config/pool-service/hikari/}
+    ports:
+      - "${SERVICE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 30
+
+  loadgen:
+    build: ./loadgen
+    depends_on:
+      service:
+        condition: service_healthy
+    environment:
+      TARGET: http://service:8080
+      WORKERS: ${WORKERS:-4}
+      WORK_MS: ${WORK_MS:-25}
+      THINK_MS: ${THINK_MS:-0}
+      REPORT_MS: ${REPORT_MS:-2000}
+      DURATION_S: ${DURATION_S:-0}
+    restart: unless-stopped
+
+  # Инструмент для ручной работы с конфигом: make config / make set-size N
+  etcdctl:
+    <<: *etcdctl
+    entrypoint: ["etcdctl"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+    profiles: ["tools"]
+
+volumes:
+  pg-data:
+  etcd-data:

@@ -1,0 +1,52 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: pool-service
+  jackson:
+    default-property-inclusion: non_null
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# Дефолты приложения. Любой из этих параметров можно переопределить в etcd
+# (см. etcd/seed-config.sh) — etcd всегда выигрывает.
+pool:
+  db:
+    jdbc-url: ${DB_URL:jdbc:postgresql://localhost:5432/demo}
+    username: ${DB_USER:app}
+    password: ${DB_PASSWORD:app}
+    pool-name: ${POOL_NAME:pool-service}
+    maximum-pool-size: ${POOL_MAX_SIZE:10}
+    connection-timeout-ms: ${POOL_CONNECTION_TIMEOUT_MS:30000}
+    idle-timeout-ms: ${POOL_IDLE_TIMEOUT_MS:600000}
+    max-lifetime-ms: ${POOL_MAX_LIFETIME_MS:1800000}
+    validation-timeout-ms: ${POOL_VALIDATION_TIMEOUT_MS:5000}
+    leak-detection-threshold-ms: ${POOL_LEAK_DETECTION_MS:0}
+    # minimum-idle намеренно не задан: null = "держи minimumIdle == maximumPoolSize"
+    # (как в HikariCP по умолчанию). Зафиксировать можно в etcd ключом minimumIdle.
+    initialization-fail-timeout-ms: -1
+    eager-fill-on-resize: ${POOL_EAGER_FILL:true}
+    # Сколько ждать активные соединения перед закрытием старого пула (при смене jdbcUrl/кредов)
+    drain-on-recreate-timeout: ${POOL_DRAIN_TIMEOUT:3s}
+    register-mbeans: true
+  etcd:
+    enabled: ${ETCD_ENABLED:true}
+    endpoints: ${ETCD_ENDPOINTS:http://localhost:2379}
+    prefix: ${ETCD_PREFIX:/config/pool-service/hikari/}
+    call-timeout: ${ETCD_CALL_TIMEOUT:5s}
+    retry-initial-backoff: ${ETCD_RETRY_INITIAL:1s}
+    retry-max-backoff: ${ETCD_RETRY_MAX:30s}
+
+logging:
+  level:
+    com.example.poolsvc: INFO
+    com.zaxxer.hikari: INFO
+    io.etcd.jetcd: WARN
