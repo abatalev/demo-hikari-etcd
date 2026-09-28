@@ -24,7 +24,7 @@ for t in $ETCD_INSTANCES; do
     svc="${t%%|*}" rest="${t#*|}"
     grp="${rest%%|*}" rest="${rest#*|}"
     inst="${rest%%|*}"
-    PREFIX="$ROOT/$svc/$grp/$inst/hikari/"
+    PREFIX="$ROOT/services/$svc/groups/$grp/instances/$inst/hikari/"
     echo "etcd-seed: $PREFIX"
     put_if_absent "${PREFIX}maximumPoolSize" "$MAX_POOL_SIZE"
     # minimumIdle намеренно не сеем: null = "держать minimumIdle == maximumPoolSize".

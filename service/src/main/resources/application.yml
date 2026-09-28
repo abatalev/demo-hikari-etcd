@@ -51,8 +51,9 @@ pool:
   etcd:
     enabled: ${ETCD_ENABLED:true}
     endpoints: ${ETCD_ENDPOINTS:http://localhost:2379}
-    # Путь ключей: {root}/{service}/{group}/{instance}/hikari/. group/instance — обязательные
-    # сегменты при enabled=true: задаются ETCD_GROUP/ETCD_INSTANCE либо POD_NAMESPACE/POD_NAME.
+    # Путь ключей: {root}/services/{service}/groups/{group}/instances/{instance}/hikari/.
+    # group/instance — обязательные сегменты при enabled=true: задаются ETCD_GROUP/ETCD_INSTANCE
+    # либо POD_NAMESPACE/POD_NAME.
     root: ${ETCD_ROOT:/config}
     service: ${SERVICE_NAME:${spring.application.name}}
     group: ${ETCD_GROUP:${POD_NAMESPACE:}}

@@ -13,9 +13,9 @@ import com.example.poolsvc.pool.HikariSettings;
  *
  * <p>Схема ключей (путь собирается из сегментов экземпляра, см. {@link EtcdKeyPath}):
  * <pre>
- *   /config/service-a/group-1/service-a-group-1-1/hikari/maximumPoolSize = 20
- *   /config/service-a/group-1/service-a-group-1-1/hikari/minimumIdle     = 5
- *   /config/service-a/group-1/service-a-group-1-1/hikari/connectionTimeoutMs = 3000
+ *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/maximumPoolSize = 20
+ *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/minimumIdle     = 5
+ *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/connectionTimeoutMs = 3000
  * </pre>
  */
 public final class EtcdKeys {

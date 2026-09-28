@@ -3,12 +3,14 @@ package com.example.poolsvc.etcd;
 /**
  * Адресация ключей конфигурации: путь
  * <pre>
- *   {root}/{service}/{group}/{instance}/hikari/
+ *   {root}/services/{service}/groups/{group}/instances/{instance}/hikari/
  * </pre>
  *
- * <p>Сегменты задают, чья это конфигурация: имя сервиса, группа (namespace), имя инстанса
- * (пода). Хвостовой сегмент {@code hikari} фиксирован и отделяет настройки пула от остальных
- * ключей экземпляра.
+ * <p>Каждый сущностный сегмент помечен статическим маркером: {@code services}, {@code groups},
+ * {@code instances}. Маркеры одинаковы для всех инстансов и делают роль сегмента явной для
+ * читателя пути (в стиле k8s). Сегменты задают, чья это конфигурация: имя сервиса, группа
+ * (namespace), имя инстанса (пода). Хвостовой сегмент {@code hikari} фиксирован и отделяет
+ * настройки пула от остальных ключей экземпляра.
  *
  * <p>Чистая функция: путь собирается и проверяется здесь, чтобы адресацию можно было покрыть
  * тестами без etcd. Сегменты проверяются на пустоту и на отсутствие разделителя пути — иначе
@@ -18,6 +20,15 @@ public final class EtcdKeyPath {
 
     /** Сегмент с ключами настроек пула; одинаков для всех инстансов. */
     public static final String HIKARI = "hikari";
+
+    /** Маркер сегмента сервиса; фиксирован и одинаков для всех инстансов. */
+    public static final String SERVICES = "services";
+
+    /** Маркер сегмента группы; фиксирован и одинаков для всех инстансов. */
+    public static final String GROUPS = "groups";
+
+    /** Маркер сегмента инстанса; фиксирован и одинаков для всех инстансов. */
+    public static final String INSTANCES = "instances";
 
     private EtcdKeyPath() {}
 
@@ -33,7 +44,8 @@ public final class EtcdKeyPath {
         requireSegment(group, "group");
         requireSegment(instance, "instance");
         String trimmedRoot = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
-        return trimmedRoot + "/" + service + "/" + group + "/" + instance + "/" + HIKARI + "/";
+        return trimmedRoot + "/" + SERVICES + "/" + service + "/" + GROUPS + "/" + group
+                + "/" + INSTANCES + "/" + instance + "/" + HIKARI + "/";
     }
 
     private static void requireSegment(String segment, String name) {

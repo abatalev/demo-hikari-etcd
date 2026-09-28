@@ -32,7 +32,7 @@ tuple_service  = $(word 1,$(subst |, ,$(1)))
 tuple_group    = $(word 2,$(subst |, ,$(1)))
 tuple_instance = $(word 3,$(subst |, ,$(1)))
 tuple_port     = $(word 4,$(subst |, ,$(1)))
-tuple_path     = $(ETCD_ROOT)/$(call tuple_service,$(1))/$(call tuple_group,$(1))/$(call tuple_instance,$(1))/hikari/
+tuple_path     = $(ETCD_ROOT)/services/$(call tuple_service,$(1))/groups/$(call tuple_group,$(1))/instances/$(call tuple_instance,$(1))/hikari/
 
 # кортеж по имени инстанса (I=...)
 tuple_by_I = $(foreach t,$(TUPLES),$(if $(filter $(I),$(call tuple_instance,$(t))),$(t)))

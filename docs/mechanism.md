@@ -6,7 +6,7 @@
 ## Путь целиком
 
 ```
-etcdctl put /config/service-a/group-1/service-a-group-1-1/hikari/maximumPoolSize 25
+etcdctl put /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/maximumPoolSize 25
      │
      ▼
 jetcd: событие watch (WatchResponse с батчем событий)
@@ -38,7 +38,7 @@ ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:70  (sy
 Путь строится сервисом из сегментов (`EtcdKeyPath.build`), а не приходит строкой извне:
 
 ```
-{ETCD_ROOT}/{service}/{group}/{instance}/hikari/
+{ETCD_ROOT}/services/{service}/groups/{group}/instances/{instance}/hikari/
 ```
 
 - `root` — `ETCD_ROOT`, дефолт `/config`;

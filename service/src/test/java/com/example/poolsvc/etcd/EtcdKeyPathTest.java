@@ -11,17 +11,19 @@ class EtcdKeyPathTest {
     void buildsPathWithIdentitySegments() {
         String path = EtcdKeyPath.build("/config", "service-a", "group-1", "service-a-group-1-1");
 
-        assertThat(path).isEqualTo("/config/service-a/group-1/service-a-group-1-1/hikari/");
+        assertThat(path).isEqualTo("/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/");
     }
 
     @Test
     void trimsTrailingSlashOfRoot() {
-        assertThat(EtcdKeyPath.build("/config/", "s", "g", "i")).isEqualTo("/config/s/g/i/hikari/");
+        assertThat(EtcdKeyPath.build("/config/", "s", "g", "i"))
+                .isEqualTo("/config/services/s/groups/g/instances/i/hikari/");
     }
 
     @Test
     void rootMayGetLeadingSlashAsGiven() {
-        assertThat(EtcdKeyPath.build("config", "s", "g", "i")).isEqualTo("config/s/g/i/hikari/");
+        assertThat(EtcdKeyPath.build("config", "s", "g", "i"))
+                .isEqualTo("config/services/s/groups/g/instances/i/hikari/");
     }
 
     @Test

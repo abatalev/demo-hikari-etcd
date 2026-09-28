@@ -113,7 +113,7 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 | переменная | дефолт | куда |
 |---|---|---|
 | `ETCD_PORT` / `ETCD_PEER_PORT` | `2379` / `2380` | порты на хосте |
-| `ETCD_ROOT` | `/config` | корень ключей; путь инстанса: `{root}/{service}/{group}/{instance}/hikari/` |
+| `ETCD_ROOT` | `/config` | корень ключей; путь инстанса: `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/` |
 | `ETCD_INSTANCES` | 8 кортежей `service\|group\|instance\|hostPort` | канонический список инстансов (см. ниже) |
 | `SEED_MAX_POOL_SIZE` | `10` | что etcd-seed положит в `maximumPoolSize`, если ключа ещё нет |
 

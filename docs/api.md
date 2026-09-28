@@ -45,7 +45,7 @@
     "enabled": true,
     "connected": true,
     "endpoints": ["http://etcd:2379"],
-    "path": "/config/service-a/group-1/service-a-group-1-1/hikari/",
+    "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/",
     "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
     "problems": {},
     "revision": 5,
@@ -101,7 +101,7 @@
 |---|---|
 | `enabled` | `false`, если `ETCD_ENABLED=false`: пул живёт на локальных дефолтах, etcd не опрашивается вообще |
 | `connected` | `running && connected`. **`false` означает, что watch не работает прямо сейчас** — и это единственный признак, по которому отличают «etcd недоступен» от «событий просто не было» |
-| `path` | путь конфигурации этого инстанса: `{root}/{service}/{group}/{instance}/hikari/`. **Отсутствует при `enabled: false`** — путь не собирается, когда источник выключен (non_null) |
+| `path` | путь конфигурации этого инстанса: `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/`. **Отсутствует при `enabled: false`** — путь не собирается, когда источник выключен (non_null) |
 | `keys` | снимок того, что сервис видит в etcd. Не пусто, а частично — например, в примере выше только два ключа, потому что etcd-seed кладёт `maximumPoolSize` и `connectionTimeoutMs` |
 | `problems` | ключи, значение которых не удалось прочитать: `{"maximumPoolSize": "'banana' — ожидалось целое число, взято значение по умолчанию"}`. Пустой объект `{}` — всё в порядке |
 | `revision` | ревизия etcd, на которой сервис находится. Растёт на каждом изменении; **не меняется — значит watch жив и просто ничего не происходит** |
@@ -157,7 +157,7 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
   "enabled": true,
   "connected": true,
   "endpoints": ["http://etcd:2379"],
-  "path": "/config/service-a/group-1/service-a-group-1-1/hikari/",
+  "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/",
   "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
   "problems": {},
   "revision": 5,
@@ -200,7 +200,7 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
 `/api/work` отвечает отдельным фильтром `TrafficGateFilter` до контроллера:
 
 ```json
-{ "error": "конфигурация не получена: в пути /config/service-a/group-1/service-a-group-1-1/hikari/ нет распознанных ключей", "ok": false }
+{ "error": "конфигурация не получена: в пути /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/ нет распознанных ключей", "ok": false }
 ```
 
 Отличается от 503 перегруза тем, что `pool`, `durationMs`, `dbMs` отсутствуют целиком — запрос
@@ -226,13 +226,13 @@ Health разбит на две группы с осознанной грани�
 Готовый инстанс:
 
 ```json
-{ "status": "UP", "components": { "db": { "status": "UP" }, "poolEtcd": { "status": "UP", "details": { "config-source": "конфигурация получена", "path": "/config/service-a/group-1/service-a-group-1-1/hikari/" } }, "readinessState": { "status": "UP" } } }
+{ "status": "UP", "components": { "db": { "status": "UP" }, "poolEtcd": { "status": "UP", "details": { "config-source": "конфигурация получена", "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/" } }, "readinessState": { "status": "UP" } } }
 ```
 
 Не готовый (etcd ещё не отдал конфигурацию):
 
 ```json
-{ "status": "DOWN", "components": { "poolEtcd": { "status": "DOWN", "details": { "config-source": "трафик закрыт: конфигурация не получена", "path": "/config/service-a/group-1/service-a-group-1-1/hikari/", "reason": "конфигурация не получена: в пути ... нет распознанных ключей" } } } }
+{ "status": "DOWN", "components": { "poolEtcd": { "status": "DOWN", "details": { "config-source": "трафик закрыт: конфигурация не получена", "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/", "reason": "конфигурация не получена: в пути ... нет распознанных ключей" } } } }
 ```
 
 Связь с etcd в деталях смотреть в `/api/config` → `connected` и `lastError`.

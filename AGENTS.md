@@ -35,7 +35,7 @@ openspec validate <name>                    # проверка артефакт�
 | capability | о чём |
 |---|---|
 | `pool-lifecycle` | создание, ресайз без пересоздания, сжатие, добивка, recreate с дренажем |
-| `etcd-config-source` | путь `{root}/{service}/{group}/{instance}/hikari/`, валидация сегментов, снимок+watch, обрывы, статус источника |
+| `etcd-config-source` | путь `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/`, валидация сегментов, снимок+watch, обрывы, статус источника |
 | `config-validation` | приоритет источников, диапазоны, поведение при ошибочных значениях |
 | `pool-observability` | HTTP-контракт наблюдения, гейт готовности, нагрузочная точка |
 | `traffic-readiness` | инстанс не принимает трафик до конфигурации из etcd; 503; liveness свободна от etcd |

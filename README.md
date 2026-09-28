@@ -6,7 +6,7 @@
 
 ```
    etcdctl put (правка размера)
-   /config/{service}/{group}/{instance}/hikari/maximumPoolSize = 25
+   /config/services/{service}/groups/{group}/instances/{instance}/hikari/maximumPoolSize = 25
             │  8 путей, по одному на инстанс
             ▼
   ┌───────────────── etcd (watch, jetcd, revision-aware) ─────────────────┐
@@ -44,7 +44,7 @@ make down              # остановить; make clean — вместе с д
 
 ```
 [etcd@4 [maximumPoolSize=put]] eager fill: пул расширен с 10 до 25 коннектов одним изменением
-[etcd@4 [maximumPoolSize=put]] конфигурация по пути /config/service-a/group-1/service-a-group-1-1/hikari/ получена, открываем трафик
+[etcd@4 [maximumPoolSize=put]] конфигурация по пути /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/ получена, открываем трафик
 ```
 
 **Что нужно на машине:** Docker + `make` + `curl` + `python3` (и `make up` зовёт `python3`).
@@ -56,8 +56,8 @@ Maven нужен только для `make test`. Локальный запус�
 Путь конфигурации инстанса:
 
 ```
-{ETCD_ROOT}/{service}/{group}/{instance}/hikari/<ключ>
-/config/service-a/group-1/service-a-group-1-1/hikari/maximumPoolSize
+{ETCD_ROOT}/services/{service}/groups/{group}/instances/{instance}/hikari/<ключ>
+/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/maximumPoolSize
 ```
 
 Сегменты: `service` — имя сервиса (`SERVICE_NAME`, фолбэк `spring.application.name`); `group` —
@@ -251,9 +251,9 @@ openspec/      спецификации и изменения (config.yaml, spec
 ## Решения, которые стоит знать
 
 - **Путь собирается из сегментов, а не берётся строкой.** `ETCD_PREFIX` удалён: сервис сам
-  строит `{root}/{service}/{group}/{instance}/hikari/`, поэтому «сервис смотрит в другой префикс,
-  чем сидер» невозможно по построению. Плата: пустые `group`/`instance` при включённом etcd —
-  отказ на старте.
+  строит `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/`, поэтому «сервис
+  смотрит в другой префикс, чем сидер» невозможно по построению. Плата: пустые `group`/`instance`
+  при включённом etcd — отказ на старте.
 - **Гейт трафика живёт в источнике конфигурации**, открывается первым распознанным ключом и
   никогда не откатывается. Живость процесса от etcd не зависит (`liveness` = `ping`).
 - **Пул создаётся один раз на весь процесс жизни приложения.** `ManagedPool` реализует
