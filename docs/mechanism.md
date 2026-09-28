@@ -6,14 +6,14 @@
 ## Путь целиком
 
 ```
-etcdctl put /config/pool-service/hikari/maximumPoolSize 25
+etcdctl put /config/service-a/group-1/service-a-group-1-1/hikari/maximumPoolSize 25
      │
      ▼
 jetcd: событие watch (WatchResponse с батчем событий)
-     │  EtcdPoolConfigSource.onEvent()            etcd/EtcdPoolConfigSource.java:213
-     │    keys.put(key, value) или keys.remove(key) — полное состояние префикса в памяти
+     │  EtcdPoolConfigSource.onEvent()            etcd/EtcdPoolConfigSource.java
+     │    keys.put(key, value) или keys.remove(key) — полное состояние пути в памяти
      ▼
-EtcdKeys.parse(keys, prefix())                     etcd/EtcdKeys.java:45
+EtcdKeys.parse(keys, path())                     etcd/EtcdKeys.java:45
      │    ключи → HikariSettings; нечитаемое значение → в problems, остальное применяется
      ▼
 .settings().resolve(defaults)                      pool/HikariSettings.java:46
@@ -33,8 +33,47 @@ ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:70  (sy
           максимум/минимум/таймауты через HikariConfigMXBean             → RESIZED
 ```
 
+## Путь конфигурации
+
+Путь строится сервисом из сегментов (`EtcdKeyPath.build`), а не приходит строкой извне:
+
+```
+{ETCD_ROOT}/{service}/{group}/{instance}/hikari/
+```
+
+- `root` — `ETCD_ROOT`, дефолт `/config`;
+- `service` — `SERVICE_NAME`, фолбэк `spring.application.name`;
+- `group` — `ETCD_GROUP`, фолбэк `POD_NAMESPACE`;
+- `instance` — `ETCD_INSTANCE`, фолбэк `POD_NAME`.
+
+Сегменты проверяются на пустоту и на отсутствие `/`; при `pool.etcd.enabled=true` пустой или
+битый сегмент прекращает запуск с именем проблемного сегмента. Выключенный источник
+(`ETCD_ENABLED=false`) путь не собирает и ничего не проверяет.
+
+`EtcdPoolConfigSource` хранит собранный путь в константе конструктора и использует его во всех
+операциях: снимок, watch, shortKey, статус. Расхождение «сервис смотрит в другой путь, чем
+сидер» исключено по построению.
+
+## Готовность к трафику (гейт конфигурации)
+
+Пока в пути нет ни одного распознанного ключа (`EtcdKeys.ALL`), инстанс **не готов принимать
+трафик**: `/api/work` отвечает 503 (фильтр `TrafficGateFilter`), `/api/pool` и `/api/config`
+работают, `/api/config` отдаёт `notReadyReason`. Живость (`liveness`) от etcd не зависит —
+процесс жив и докатывает конфигурацию с backoff'ом.
+
+Гейт открывается в `updateReadiness()` после `apply()`: первый снимок или событие, принёсшее
+распознанный ключ, публикует `AvailabilityChangeEvent<ReadinessState.ACCEPTING_TRAFFIC>` и
+логирует открытие. Открытый гейт не откатывается: обрыв etcd после применения конфигурации
+трафик не останавливает (согласуется с правилом «обрыв не влияет на пул»). Отклонённая при
+проверке конфигурация (REJECTED) гейт не удерживает — значение из хранилища получено.
+
+Пустой снимок до открытия гейта логирует предупреждение с путём один раз за прогон и оставляет
+`notReadyReason`: «конфигурация не получена: в пути … нет распознанных ключей». При недоступном
+etcd причина другая: «конфигурация не получена: etcd недоступен (…)» — это отдельное поле, не
+перекрывающее `lastError`.
+
 Всё это выполняется в одном потоке — `etcd-config-watch` (платформенный daemon-поток,
-`EtcdPoolConfigSource.java:82`). Метод `apply()` синхронизирован, поэтому два события,
+`EtcdPoolConfigSource#start()`). Метод `apply()` синхронизирован, поэтому два события,
 пришедшие подряд, никогда не применятся одновременно.
 
 ## Снимок + watch
@@ -43,7 +82,7 @@ ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:70  (sy
 `EtcdPoolConfigSource:119-141`:
 
 ```java
-long revision = snapshot(c);   // get по префиксу, isPrefix=true
+long revision = snapshot(c);   // get по пути инстанса, isPrefix=true
 watch(c, revision + 1);       // подписка со следующей ревизии
 ```
 
@@ -201,7 +240,7 @@ while (pool.getActiveConnections() > 0 && System.nanoTime() < deadline) {
 
 | outcome | когда | видно |
 |---|---|---|
-| `CREATED` | первый пул в процессе | `HikariCP 'pool-service' создан: ...` |
+| `CREATED` | первый пул в процессе | `HikariCP '<имя инстанса>' создан: ...` |
 | `RESIZED` | настройки изменились, пул тот же | `обновлён на лету: maximumPoolSize: 10 -> 25` + строка eager fill при росте |
 | `RECREATED` | сменилась цель (jdbcUrl/креды/имя) | `пересоздан (сменилась цель: jdbcUrl/креды/имя)`, перед этим строки про дренаж |
 | `UNCHANGED` | diff пуст | ничего, только debug |

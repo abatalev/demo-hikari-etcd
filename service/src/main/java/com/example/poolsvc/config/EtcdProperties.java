@@ -12,8 +12,17 @@ public class EtcdProperties {
 
     private List<String> endpoints = List.of("http://localhost:2379");
 
-    /** Префикс ключей конфигурации пула. */
-    private String prefix = "/config/pool-service/hikari/";
+    /** Корень ключей конфигурации (дефолт «/config»); сегменты пути см. ниже. */
+    private String root = "/config";
+
+    /** Имя сервиса — первый сегмент пути. */
+    private String service;
+
+    /** Группа (namespace) — второй сегмент пути. */
+    private String group;
+
+    /** Имя инстанса (pod name) — третий сегмент пути, обязателен при enabled=true. */
+    private String instance;
 
     private Duration callTimeout = Duration.ofSeconds(5);
     private Duration retryInitialBackoff = Duration.ofSeconds(1);
@@ -35,12 +44,36 @@ public class EtcdProperties {
         this.endpoints = endpoints;
     }
 
-    public String getPrefix() {
-        return prefix;
+    public String getRoot() {
+        return root;
     }
 
-    public void setPrefix(String prefix) {
-        this.prefix = prefix;
+    public void setRoot(String root) {
+        this.root = root;
+    }
+
+    public String getService() {
+        return service;
+    }
+
+    public void setService(String service) {
+        this.service = service;
+    }
+
+    public String getGroup() {
+        return group;
+    }
+
+    public void setGroup(String group) {
+        this.group = group;
+    }
+
+    public String getInstance() {
+        return instance;
+    }
+
+    public void setInstance(String instance) {
+        this.instance = instance;
     }
 
     public Duration getCallTimeout() {

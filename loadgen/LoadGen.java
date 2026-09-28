@@ -19,11 +19,15 @@ import java.util.concurrent.atomic.LongAdder;
  * состояние пула (из /api/pool) вместе с rps/перцентилями.
  *
  * Только JDK: собирается одним файлом, тянется в стенд без maven.
- * Настройки через env: TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S.
+ * Настройки через env: TARGET, STATUS_TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S.
+ * STATUS_TARGET (дефолт = TARGET): откуда брать /api/pool для отчёта. Под балансировщиком
+ * TARGET — это nginx, и сводка мигала бы между инстансами группы; задавая STATUS_TARGET
+ * на конкретный инстанс, отчёт стабильно показывает один пул.
  */
 public final class LoadGen {
 
     private static final String TARGET = env("TARGET", "http://localhost:8080");
+    private static final String STATUS_TARGET = env("STATUS_TARGET", TARGET);
     private static final int WORKERS = (int) envLong("WORKERS", 4);
     private static final long WORK_MS = envLong("WORK_MS", 25);
     private static final long THINK_MS = envLong("THINK_MS", 0);
@@ -86,8 +90,8 @@ public final class LoadGen {
                 .build();
 
         System.out.printf(Locale.ROOT,
-                "loadgen -> %s | workers=%d work=%dms think=%dms report=%dms duration=%s%n",
-                TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S == 0 ? "∞" : DURATION_S + "s");
+                "loadgen -> %s (status -> %s) | workers=%d work=%dms think=%dms report=%dms duration=%s%n",
+                TARGET, STATUS_TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S == 0 ? "∞" : DURATION_S + "s");
         System.out.println("колонки: rps p50 p95 max inflight ok err | пул: max total active idle waiting | pg: sessions active idle");
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -211,7 +215,7 @@ public final class LoadGen {
 
     private static String fetchPoolJson() throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(TARGET + "/api/pool"))
+                .uri(URI.create(STATUS_TARGET + "/api/pool"))
                 .timeout(Duration.ofSeconds(5))
                 .GET()
                 .build();

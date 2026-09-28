@@ -8,14 +8,14 @@ import java.util.Set;
 import com.example.poolsvc.pool.HikariSettings;
 
 /**
- * Разбор плоских ключей etcd в настройки пула. Отдельный класс, чтобы это можно было
+ * Разбор ключей etcd в настройки пула. Отдельный класс, чтобы это можно было
  * покрыть тестами без поднятия etcd.
  *
- * <p>Схема ключей (префикс настраивается через pool.etcd.prefix):
+ * <p>Схема ключей (путь собирается из сегментов экземпляра, см. {@link EtcdKeyPath}):
  * <pre>
- *   /config/pool-service/hikari/maximumPoolSize = 20
- *   /config/pool-service/hikari/minimumIdle     = 5
- *   /config/pool-service/hikari/connectionTimeoutMs = 3000
+ *   /config/service-a/group-1/service-a-group-1-1/hikari/maximumPoolSize = 20
+ *   /config/service-a/group-1/service-a-group-1-1/hikari/minimumIdle     = 5
+ *   /config/service-a/group-1/service-a-group-1-1/hikari/connectionTimeoutMs = 3000
  * </pre>
  */
 public final class EtcdKeys {

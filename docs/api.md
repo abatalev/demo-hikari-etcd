@@ -45,7 +45,7 @@
     "enabled": true,
     "connected": true,
     "endpoints": ["http://etcd:2379"],
-    "prefix": "/config/pool-service/hikari/",
+    "path": "/config/service-a/group-1/service-a-group-1-1/hikari/",
     "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
     "problems": {},
     "revision": 5,
@@ -100,7 +100,8 @@
 | поле | что это |
 |---|---|
 | `enabled` | `false`, если `ETCD_ENABLED=false`: пул живёт на локальных дефолтах, etcd не опрашивается вообще |
-| `connected` | `running && connected`. **`false` означает, что watch не работает прямо сейчас** — и это единственный признак, по которому отличают «etd недоступен» от «событий просто не было» |
+| `connected` | `running && connected`. **`false` означает, что watch не работает прямо сейчас** — и это единственный признак, по которому отличают «etcd недоступен» от «событий просто не было» |
+| `path` | путь конфигурации этого инстанса: `{root}/{service}/{group}/{instance}/hikari/`. **Отсутствует при `enabled: false`** — путь не собирается, когда источник выключен (non_null) |
 | `keys` | снимок того, что сервис видит в etcd. Не пусто, а частично — например, в примере выше только два ключа, потому что etcd-seed кладёт `maximumPoolSize` и `connectionTimeoutMs` |
 | `problems` | ключи, значение которых не удалось прочитать: `{"maximumPoolSize": "'banana' — ожидалось целое число, взято значение по умолчанию"}`. Пустой объект `{}` — всё в порядке |
 | `revision` | ревизия etcd, на которой сервис находится. Растёт на каждом изменении; **не меняется — значит watch жив и просто ничего не происходит** |
@@ -108,6 +109,7 @@
 | `applyCount` | сколько раз применялся конфиг. Растёт и на ресайзе, и на отклонённом конфиге |
 | `lastOutcome` | итог последнего apply: `CREATED`, `RESIZED`, `RECREATED`, `UNCHANGED`, `REJECTED` |
 | `lastError` | появляется только при проблеме: ошибка etcd, compaction, либо список причин от `REJECTED` |
+| `notReadyReason` | почему закрыт гейт трафика: «конфигурация не получена: в пути … нет распознанных ключей» или «…: etcd недоступен (…)». Отдельное поле, не перекрывает `lastError`; отсутствует, когда источник выключен или трафик открыт |
 
 `lastError` — поле, которое стоит мониторить в проде. Оно заполняется в трёх случаях: сломался
 etcd-клиент, прилетел `REJECTED`-конфиг, не удалось применить конфиг целиком.
@@ -131,7 +133,6 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
   "enabled": false,
   "connected": false,
   "endpoints": ["http://localhost:2379"],
-  "prefix": "/config/pool-service/hikari/",
   "keys": {},
   "problems": {},
   "revision": 0,
@@ -144,6 +145,7 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
 `enabled: false`, etcd не опрашивался и применяться нечего (`applyCount: 0`). Если же
 `enabled: true` при `connected: false` — вот это уже проблема, смотрите `lastError`.
 Поле `lastOutcome` отсутствует целиком: apply не происходил, а `null`-поля выбрасываются.
+`path` и `notReadyReason` тоже отсутствуют: при выключенном источнике путь не собирается.
 
 ## `GET /api/config`
 
@@ -155,7 +157,7 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
   "enabled": true,
   "connected": true,
   "endpoints": ["http://etcd:2379"],
-  "prefix": "/config/pool-service/hikari/",
+  "path": "/config/service-a/group-1/service-a-group-1-1/hikari/",
   "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
   "problems": {},
   "revision": 5,
@@ -194,14 +196,43 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
 | `rows` | `count(*)` из `demo_items` (2000 строк). Отражает размер таблицы, а не нагрузку |
 | `pool` | снимок пула в момент ответа. Именно этот снимок нагрузчик раз в `REPORT_MS` берёт из `/api/pool`, а не из этого ответа |
 
+**503 от гейта конфигурации (без входа в метод).** Пока инстанс не получил конфигурацию из etcd,
+`/api/work` отвечает отдельным фильтром `TrafficGateFilter` до контроллера:
+
+```json
+{ "error": "конфигурация не получена: в пути /config/service-a/group-1/service-a-group-1-1/hikari/ нет распознанных ключей", "ok": false }
+```
+
+Отличается от 503 перегруза тем, что `pool`, `durationMs`, `dbMs` отсутствуют целиком — запрос
+не дошёл до пула. `/api/pool` и `/api/config` при этом работают: неготовый инстанс обязан быть
+наблюдаемым.
+
 `ms` ограничен диапазоном 0..5000, за пределами — 400. При `ms=0` запрос не удерживает коннект,
 это способ измерить чистое время получения коннекта из пула.
 
 Значения `ms`, дающие видимый эффект на стенде: 25 (лёгкая постоянная нагрузка, 4 потока),
 200 (перегрузка при маленьком пуле), 1000 и выше (легко увидеть очередь).
 
-## `GET /actuator/health`
+## `GET /actuator/health`, `/actuator/health/readiness`, `/actuator/health/liveness`
 
-Простой `{"status":"UP"}` плюс детали (`show-details: always`). Никакой привязки к etcd: если
-etcd лежит, health остаётся `UP` — это осознанно, сервис продолжает работать на последнем
-конфиге. Смотреть связь с etcd надо в `/api/config` → `connected`.
+Health разбит на две группы с осознанной границей:
+
+- `readiness` — `readinessState,db,poolEtcd`: готова ли система принимать трафик. Пока гейт
+  конфигурации закрыт, `poolEtcd` отдаёт `DOWN` с причиной в деталях, и группа в целом `DOWN`.
+  Комpose-healthcheck и `make up` смотрят именно в неё.
+- `liveness` — только `ping`: процесс жив независимо от etcd и базы. Обрыв etcd не валит
+  liveness и не роняет под в k8s.
+
+Готовый инстанс:
+
+```json
+{ "status": "UP", "components": { "db": { "status": "UP" }, "poolEtcd": { "status": "UP", "details": { "config-source": "конфигурация получена", "path": "/config/service-a/group-1/service-a-group-1-1/hikari/" } }, "readinessState": { "status": "UP" } } }
+```
+
+Не готовый (etcd ещё не отдал конфигурацию):
+
+```json
+{ "status": "DOWN", "components": { "poolEtcd": { "status": "DOWN", "details": { "config-source": "трафик закрыт: конфигурация не получена", "path": "/config/service-a/group-1/service-a-group-1-1/hikari/", "reason": "конфигурация не получена: в пути ... нет распознанных ключей" } } } }
+```
+
+Связь с etcd в деталях смотреть в `/api/config` → `connected` и `lastError`.

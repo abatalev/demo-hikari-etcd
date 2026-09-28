@@ -15,6 +15,17 @@ management:
   endpoint:
     health:
       show-details: always
+      # Пробы регистрируют индикаторы readinessState/livenessState, без которых
+      # группа readiness не сможет включить readinessState (валидация упадёт на старте).
+      probes:
+        enabled: true
+      group:
+        # Готовность: гейт конфигурации (readinessState + poolEtcd) и доступность базы.
+        # Живость — только ping: процесс жив независимо от etcd и базы.
+        readiness:
+          include: readinessState,db,poolEtcd
+        liveness:
+          include: ping
 
 # Дефолты приложения. Любой из этих параметров можно переопределить в etcd
 # (см. etcd/seed-config.sh) — etcd всегда выигрывает.
@@ -40,7 +51,12 @@ pool:
   etcd:
     enabled: ${ETCD_ENABLED:true}
     endpoints: ${ETCD_ENDPOINTS:http://localhost:2379}
-    prefix: ${ETCD_PREFIX:/config/pool-service/hikari/}
+    # Путь ключей: {root}/{service}/{group}/{instance}/hikari/. group/instance — обязательные
+    # сегменты при enabled=true: задаются ETCD_GROUP/ETCD_INSTANCE либо POD_NAMESPACE/POD_NAME.
+    root: ${ETCD_ROOT:/config}
+    service: ${SERVICE_NAME:${spring.application.name}}
+    group: ${ETCD_GROUP:${POD_NAMESPACE:}}
+    instance: ${ETCD_INSTANCE:${POD_NAME:}}
     call-timeout: ${ETCD_CALL_TIMEOUT:5s}
     retry-initial-backoff: ${ETCD_RETRY_INITIAL:1s}
     retry-max-backoff: ${ETCD_RETRY_MAX:30s}
