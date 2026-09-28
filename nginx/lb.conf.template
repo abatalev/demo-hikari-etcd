@@ -8,7 +8,10 @@ upstream pool_instances {
 }
 
 server {
+    # dual-stack обязателен: образный healthcheck (wget http://localhost/healthz)
+    # резолвит localhost в ::1, и без IPv6-слушателя контейнер вечно unhealthy.
     listen 80;
+    listen [::]:80;
 
     # Точка для healthcheck'а балансировщика (make up ждёт её).
     location = /healthz {
