@@ -61,6 +61,8 @@ pool:
     call-timeout: ${ETCD_CALL_TIMEOUT:5s}
     retry-initial-backoff: ${ETCD_RETRY_INITIAL:1s}
     retry-max-backoff: ${ETCD_RETRY_MAX:30s}
+    # TTL аренды узла регистрации инстанса; keepalive идёт каждые TTL/3.
+    registration-ttl: ${ETCD_REGISTRATION_TTL:15s}
 
 logging:
   level:

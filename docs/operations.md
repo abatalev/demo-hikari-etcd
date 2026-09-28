@@ -171,6 +171,7 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 | `ETCD_ENABLED` | `true` | `false` — пул живёт на локальных дефолтах, etcd не опрашивается, путь не собирается, гейта нет |
 | `ETCD_CALL_TIMEOUT` | `5s` | таймаут запросов к etcd |
 | `ETCD_RETRY_INITIAL` / `ETCD_RETRY_MAX` | `1s` / `30s` | границы backoff'а переподключения |
+| `ETCD_REGISTRATION_TTL` | `15s` | TTL аренды узла регистрации инстанса; keepalive идёт каждые TTL/3 (5с) |
 | `POOL_CONNECTION_TIMEOUT_MS` и прочие `POOL_*` | см. `application.yml` | локальные дефолты пула; etcd перекрывает |
 
 ## Готовность к трафику
@@ -184,6 +185,28 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 Проверить всех сразу: `make pool` (колонка `ready`). Один инстанс:
 `curl -s localhost:18081/actuator/health/readiness | python3 -m json.tool` и
 `curl -s localhost:18081/api/config | python3 -m json.tool`.
+
+## Регистрация инстансов
+
+При включённом источнике каждый инстанс на старте создаёт в etcd узел со своим именем — на
+уровень выше ключей конфигурации:
+
+```
+/config/services/{service}/groups/{group}/instances/{instance}
+```
+
+Узел держится арендой (TTL, дефолт `ETCD_REGISTRATION_TTL=15s`) и исчезает при остановке:
+штатной — немедленно, при падении процесса — по истечении TTL. Узел лежит вне префикса `hikari/`,
+поэтому на готовность и гейт трафика не влияет; в `/api/config` он не показывается. Смотреть:
+
+```bash
+make registrations            # живые узлы: имя инстанса = последний сегмент ключа
+make config                   # ключи конфигурации (hikari/...) отдельно от узла
+docker compose stop service-a-group-1-1 && make registrations   # узел исчез сразу
+```
+
+При `ETCD_ENABLED=false` регистрации нет. Тонкость времени: после `kill -9` узел ещё ~TTL
+виден — это свойство аренды, а не сбой.
 
 ## Локальный запуск без compose
 

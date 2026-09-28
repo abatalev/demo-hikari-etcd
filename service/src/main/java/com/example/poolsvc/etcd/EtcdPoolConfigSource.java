@@ -3,9 +3,12 @@ package com.example.poolsvc.etcd;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KeyValue;
+import io.etcd.jetcd.Lease;
 import io.etcd.jetcd.Watch;
 import io.etcd.jetcd.kv.GetResponse;
+import io.etcd.jetcd.lease.LeaseGrantResponse;
 import io.etcd.jetcd.options.GetOption;
+import io.etcd.jetcd.options.PutOption;
 import io.etcd.jetcd.options.WatchOption;
 import io.etcd.jetcd.watch.WatchEvent;
 import io.etcd.jetcd.watch.WatchResponse;
@@ -50,6 +53,12 @@ import com.example.poolsvc.pool.ManagedPool;
  * сервис остаётся запущенным, но не готов принимать трафик — готовность (readiness) закрыта,
  * живость (liveness) от etcd не зависит. После первого распознанного ключа гейт открывается
  * навсегда: дальнейшая недоступность etcd не останавливает обслуживание.
+ *
+ * <p>Регистрация инстанса: при включённом источнике на старте в etcd создаётся узел
+ * {@code {root}/.../instances/{instance}} (имя ключа = имя инстанса), удерживаемый арендой
+ * (TTL + keepalive). Узел живёт на уровень выше {@code hikari/}, поэтому конфиг-воркер его не
+ * видит — на готовность и гейт регистрация не влияет. Штатная остановка отзывает аренду
+ * (узел исчезает сразу), падение процесса — по истечении TTL.
  */
 @Component
 public class EtcdPoolConfigSource implements SmartLifecycle {
@@ -64,6 +73,9 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     /** Путь ключей этого экземпляра; null, когда источник выключен. */
     private final String path;
 
+    /** Узел регистрации инстанса (путь без хвоста {@code hikari/}); null, когда источник выключен. */
+    private final String nodePath;
+
     private final Map<String, String> keys = new ConcurrentHashMap<>();
     private final Map<String, String> reportedProblems = new ConcurrentHashMap<>();
     private final Set<String> warnedUnknownKeys = ConcurrentHashMap.newKeySet();
@@ -77,10 +89,13 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private final AtomicReference<String> lastError = new AtomicReference<>();
     private final AtomicReference<String> notReadyReason = new AtomicReference<>();
     private final AtomicReference<ManagedPool.Outcome> lastOutcome = new AtomicReference<>();
+    /** Номер текущей аренды узла регистрации; -1, когда аренды нет. */
+    private final AtomicLong registrationLease = new AtomicLong(-1);
     private final AtomicBoolean emptyPrefixLogged = new AtomicBoolean();
 
     private volatile Client client;
     private volatile Thread watcherThread;
+    private volatile Thread registrationThread;
 
     public EtcdPoolConfigSource(ManagedPool pool, DbProperties dbProperties, EtcdProperties properties,
             ApplicationEventPublisher eventPublisher) {
@@ -91,8 +106,11 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
         if (properties.isEnabled()) {
             this.path = EtcdKeyPath.build(properties.getRoot(), properties.getService(),
                     properties.getGroup(), properties.getInstance());
+            this.nodePath = EtcdKeyPath.nodePath(properties.getRoot(), properties.getService(),
+                    properties.getGroup(), properties.getInstance());
         } else {
             this.path = null;
+            this.nodePath = null;
         }
     }
 
@@ -130,6 +148,12 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 .name("etcd-config-watch")
                 .unstarted(this::watchLoop);
         watcherThread.start();
+        // Регистрация — отдельный поток: keepalive не должен блокировать конфиг-watch.
+        registrationThread = Thread.ofPlatform()
+                .daemon(true)
+                .name("etcd-registration")
+                .unstarted(this::registrationLoop);
+        registrationThread.start();
     }
 
     @Override
@@ -137,10 +161,25 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
         if (!running.compareAndSet(true, false)) {
             return;
         }
-        Thread thread = watcherThread;
-        if (thread != null) {
-            thread.interrupt();
+        Thread w = watcherThread;
+        if (w != null) {
+            w.interrupt();
         }
+        Thread r = registrationThread;
+        if (r != null) {
+            r.interrupt();
+        }
+        // Отзываем аренду до закрытия клиента; пробуем дважды, чтобы поймать аренду,
+        // которую поток успел выдать, но ещё не опубликовал до первого захода.
+        revokeRegistration();
+        if (r != null) {
+            try {
+                r.join(properties.getCallTimeout().toMillis() + 1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        revokeRegistration();
         Client c = client;
         if (c != null) {
             try {
@@ -200,6 +239,85 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 log.info("etcd watch стартует: endpoints={} path={}", properties.getEndpoints(), path);
             }
             return client;
+        }
+    }
+
+    /**
+     * Регистрация инстанса в etcd: узел {@code .../instances/{instance}} на аренде.
+     *
+     * <p>Цикл: grant(ttl) → put(узел, пустое значение, lease) → keepalive каждые ttl/3.
+     * Любая ошибка (обрыв etcd, истёкшая аренда) возвращает цикл к перерегистрации с backoff —
+     * узел восстанавливается, как только хранилище снова отвечает. Штатный стоп аренду
+     * отзывает в {@link #stop()} — здесь при прерывании просто выходим.
+     */
+    private void registrationLoop() {
+        long ttlSeconds = properties.getRegistrationTtl().getSeconds();
+        long keepaliveMs = Math.max(1, ttlSeconds / 3) * 1000L;
+        long backoffMs = properties.getRetryInitialBackoff().toMillis();
+        while (running.get()) {
+            try {
+                Client c = client();
+                Lease leaseClient = c.getLeaseClient();
+                long lease = leaseClient.grant(ttlSeconds)
+                        .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                        .getID();
+                registrationLease.set(lease);
+                c.getKVClient()
+                        .put(ByteSequence.from(nodePath, StandardCharsets.UTF_8), ByteSequence.EMPTY,
+                                PutOption.newBuilder().withLeaseId(lease).build())
+                        .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
+                log.info("инстанс зарегистрирован: узел {} (lease={}, ttl={}s)", nodePath, lease, ttlSeconds);
+                while (running.get()) {
+                    try {
+                        leaseClient.keepAliveOnce(lease)
+                                .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (Exception e) {
+                        log.warn("keepalive узла регистрации оборвался ({}), перерегистрируюсь",
+                                e.toString());
+                        if (!sleep(backoffMs)) {
+                            return;
+                        }
+                        break;
+                    }
+                    if (!sleep(keepaliveMs)) {
+                        return;
+                    }
+                }
+                backoffMs = properties.getRetryInitialBackoff().toMillis();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                log.warn("регистрация не удалась ({}), повтор через {} мс", e.toString(), backoffMs);
+                if (!sleep(backoffMs)) {
+                    return;
+                }
+                backoffMs = Math.min(backoffMs * 2, properties.getRetryMaxBackoff().toMillis());
+            }
+        }
+    }
+
+    /** Отзыв аренды узла регистрации (best effort): при неудаче узел исчезнет сам по TTL. */
+    private void revokeRegistration() {
+        long lease = registrationLease.get();
+        if (lease <= 0) {
+            return;
+        }
+        Client c = client;
+        if (c == null) {
+            return;
+        }
+        try {
+            c.getLeaseClient().revoke(lease)
+                    .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            log.info("аренда узла регистрации отозвана (lease={})", lease);
+            registrationLease.set(-1);
+        } catch (Exception e) {
+            log.warn("не удалось отозвать аренду регистрации (lease={}): {} — узел исчезнет по TTL",
+                    lease, e.toString());
         }
     }
 

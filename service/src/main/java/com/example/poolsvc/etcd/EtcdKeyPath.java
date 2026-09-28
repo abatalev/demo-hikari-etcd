@@ -39,13 +39,24 @@ public final class EtcdKeyPath {
      * @throws IllegalArgumentException название проблемного сегмента в сообщении
      */
     public static String build(String root, String service, String group, String instance) {
+        return nodePath(root, service, group, instance) + HIKARI + "/";
+    }
+
+    /**
+     * Путь узла регистрации инстанса: путь конфигурации без хвостового сегмента {@code hikari}.
+     *
+     * <p>Узел появляется в etcd, когда инстанс регистрируется (аренда), и исчезает при его
+     * остановке. Конфиг-воркер читает только префикс {@code .../hikari/}, поэтому узел не попадает
+     * ни в снимок, ни в события watch — он невидим для применения конфигурации и для гейта.
+     */
+    public static String nodePath(String root, String service, String group, String instance) {
         requireNonBlank(root, "root");
         requireSegment(service, "service");
         requireSegment(group, "group");
         requireSegment(instance, "instance");
         String trimmedRoot = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
         return trimmedRoot + "/" + SERVICES + "/" + service + "/" + GROUPS + "/" + group
-                + "/" + INSTANCES + "/" + instance + "/" + HIKARI + "/";
+                + "/" + INSTANCES + "/" + instance + "/";
     }
 
     private static void requireSegment(String segment, String name) {

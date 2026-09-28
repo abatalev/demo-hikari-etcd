@@ -60,4 +60,24 @@ class EtcdKeyPathTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("service");
     }
+
+    @Test
+    void nodePathIsConfigPathWithoutHikari() {
+        assertThat(EtcdKeyPath.nodePath("/config", "service-a", "group-1", "service-a-group-1-1"))
+                .isEqualTo("/config/services/service-a/groups/group-1/instances/service-a-group-1-1/");
+    }
+
+    @Test
+    void nodePathAndBuildShareTheSamePrefix() {
+        String config = EtcdKeyPath.build("/config", "s", "g", "i");
+        assertThat(config).startsWith(EtcdKeyPath.nodePath("/config", "s", "g", "i"));
+        assertThat(config).isEqualTo(EtcdKeyPath.nodePath("/config", "s", "g", "i") + "hikari/");
+    }
+
+    @Test
+    void nodePathValidatesSegmentsLikeBuild() {
+        assertThatThrownBy(() -> EtcdKeyPath.nodePath("/config", "service-a", "g", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("instance");
+    }
 }

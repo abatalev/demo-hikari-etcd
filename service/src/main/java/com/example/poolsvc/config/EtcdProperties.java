@@ -28,6 +28,9 @@ public class EtcdProperties {
     private Duration retryInitialBackoff = Duration.ofSeconds(1);
     private Duration retryMaxBackoff = Duration.ofSeconds(30);
 
+    /** TTL аренды узла регистрации инстанса; keepalive идёт каждые TTL/3 (дефолт 15с → 5с). */
+    private Duration registrationTtl = Duration.ofSeconds(15);
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -98,5 +101,13 @@ public class EtcdProperties {
 
     public void setRetryMaxBackoff(Duration retryMaxBackoff) {
         this.retryMaxBackoff = retryMaxBackoff;
+    }
+
+    public Duration getRegistrationTtl() {
+        return registrationTtl;
+    }
+
+    public void setRegistrationTtl(Duration registrationTtl) {
+        this.registrationTtl = registrationTtl;
     }
 }
