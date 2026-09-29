@@ -27,15 +27,17 @@ management:
         liveness:
           include: ping
 
-# Дефолты приложения. Любой из этих параметров можно переопределить в etcd
-# (стартовые ключи нового инстанса кладёт config-provisioner) — etcd всегда выигрывает.
+# Дефолты приложения. Размер пула (maximumPoolSize) задаётся ТОЛЬКО etcd-конфигурацией провижера:
+# локальный дефолт жёстко 0, пул не создаётся, пока не пришёл первый конфиг. Остальные параметры
+# можно переопределить в etcd (стартовые ключи нового инстанса кладёт config-provisioner) — etcd
+# всегда выигрывает.
 pool:
   db:
     jdbc-url: ${DB_URL:jdbc:postgresql://localhost:5432/demo}
     username: ${DB_USER:app}
     password: ${DB_PASSWORD:app}
     pool-name: ${POOL_NAME:pool-service}
-    maximum-pool-size: ${POOL_MAX_SIZE:10}
+    maximum-pool-size: 0
     connection-timeout-ms: ${POOL_CONNECTION_TIMEOUT_MS:30000}
     idle-timeout-ms: ${POOL_IDLE_TIMEOUT_MS:600000}
     max-lifetime-ms: ${POOL_MAX_LIFETIME_MS:1800000}

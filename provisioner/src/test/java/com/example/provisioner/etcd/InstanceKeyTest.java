@@ -150,30 +150,44 @@ class InstanceKeyTest {
 
     @Test
     void parsesServiceBudgetKeys() {
-        var max = InstanceKey.parse(ROOT, "/config/services/service-a/maxConnections");
+        var max = InstanceKey.parse(ROOT, "/config/services/service-a/activeMaxConnections");
         assertInstanceOf(InstanceKey.ServiceSetting.class, max);
-        assertEquals(new InstanceKey.ServiceSetting("service-a", "maxConnections"), max);
+        assertEquals(new InstanceKey.ServiceSetting("service-a", "activeMaxConnections"), max);
 
-        var min = InstanceKey.parse(ROOT, "/config/services/service-a/minConnections");
+        var min = InstanceKey.parse(ROOT, "/config/services/service-a/activeMinConnections");
         assertInstanceOf(InstanceKey.ServiceSetting.class, min);
-        assertEquals(new InstanceKey.ServiceSetting("service-a", "minConnections"), min);
+        assertEquals(new InstanceKey.ServiceSetting("service-a", "activeMinConnections"), min);
+
+        var reserve = InstanceKey.parse(ROOT, "/config/services/service-a/inactiveMaxConnections");
+        assertInstanceOf(InstanceKey.ServiceSetting.class, reserve);
+        assertEquals(new InstanceKey.ServiceSetting("service-a", "inactiveMaxConnections"), reserve);
+    }
+
+    @Test
+    void rejectsOldBudgetKeyNames() {
+        // Старые имена бюджета (maxConnections/minConnections) больше не распознаются — после
+        // миграции это опечатка, провизор её игнорирует (и требует make clean && make up).
+        assertInstanceOf(InstanceKey.Other.class,
+                InstanceKey.parse(ROOT, "/config/services/service-a/maxConnections"));
+        assertInstanceOf(InstanceKey.Other.class,
+                InstanceKey.parse(ROOT, "/config/services/service-a/minConnections"));
     }
 
     @Test
     void rejectsUnknownServiceLevelKey() {
-        // Сервисный уровень: распознаются только два ключа бюджета, остальное — опечатка.
+        // Сервисный уровень: распознаются только три ключа бюджета, остальное — опечатка.
         assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT, "/config/services/a/foo"));
         assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT, "/config/services/a"));
         assertInstanceOf(InstanceKey.Other.class,
-                InstanceKey.parse(ROOT, "/config/services/a/maxConnections/extra"));
+                InstanceKey.parse(ROOT, "/config/services/a/activeMaxConnections/extra"));
         assertInstanceOf(InstanceKey.Other.class,
-                InstanceKey.parse(ROOT, "/config/services//maxConnections"));
+                InstanceKey.parse(ROOT, "/config/services//activeMaxConnections"));
     }
 
     @Test
     void serviceSettingKeyRoundTrip() {
-        String key = InstanceKey.serviceSettingKey(ROOT, "service-a", InstanceKey.MAX_CONNECTIONS);
-        assertEquals("/config/services/service-a/maxConnections", key);
+        String key = InstanceKey.serviceSettingKey(ROOT, "service-a", InstanceKey.ACTIVE_MAX_CONNECTIONS);
+        assertEquals("/config/services/service-a/activeMaxConnections", key);
         assertInstanceOf(InstanceKey.ServiceSetting.class, InstanceKey.parse(ROOT, key));
     }
 
@@ -181,9 +195,10 @@ class InstanceKeyTest {
     void liveServicesIgnoresServiceBudgetKeys() {
         // Ключи бюджета не создают сервис и не увеличивают число живых инстансов.
         var keys = java.util.List.of(
-                "/config/services/service-a/maxConnections",
-                "/config/services/service-a/minConnections",
-                "/config/services/service-b/maxConnections");
+                "/config/services/service-a/activeMaxConnections",
+                "/config/services/service-a/activeMinConnections",
+                "/config/services/service-a/inactiveMaxConnections",
+                "/config/services/service-b/activeMaxConnections");
         assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT, keys));
     }
 }

@@ -26,6 +26,11 @@ import org.slf4j.LoggerFactory;
  * (maximumPoolSize/minimumIdle/timeouts). Полное пересоздание — только когда поменялась
  * "целевая" часть конфига (jdbcUrl/логин/пароль/имя пула), которую MBean менять не умеет.
  *
+ * <p>Размер пула задаётся только конфигурацией из etcd: локальный дефолт максимума 0, и пул не
+ * создаётся, пока не пришёл первый конфиг. Целевой максимум 0 (резерв холодной группы, снятие
+ * конфигурации) честно закрывает пул с дренажом активных соединений — {@code dataSource}
+ * становится {@code null}, а память о последнем конфиге остаётся в {@link #applied}.
+ *
  * <p>Инстанс намеренно реализует {@link DataSource}, а не отдаёт {@code HikariDataSource} наружу:
  * тогда {@code JdbcTemplate} и менеджер транзакций Spring следуют за подменой пула сами.
  */
@@ -59,13 +64,18 @@ public class ManagedPool implements DataSource, AutoCloseable {
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
         HikariSettings.Normalized startup = defaults.normalize();
         startup.warnings().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
-        create(startup.settings(), "startup");
+        if (startup.settings().maximumPoolSize() > 0) {
+            create(startup.settings(), "startup");
+        } else {
+            log.info("локальный максимум пула = 0: пул не создан, размер придёт из конфигурации etcd");
+            lastReason.set("startup: пула нет (размер 0, ждём конфигурацию из etcd)");
+        }
     }
 
     /**
      * Применяет новый конфиг.
      *
-     * @return что именно произошло: пул создан, пересоздан, ресайзнут или конфиг не изменился
+     * @return что именно произошло: пул создан, пересоздан, ресайзнут, закрыт или конфиг не изменился
      */
     public synchronized ApplyResult apply(HikariSettings desired, String reason) {
         HikariSettings target;
@@ -75,18 +85,40 @@ public class ManagedPool implements DataSource, AutoCloseable {
             target = normalized.settings();
             warnings = normalized.warnings();
         } catch (InvalidSettingsException e) {
+            HikariSettings appliedSettings = applied.get();
             log.error("[{}] конфиг отклонён ({}), остаёмся на предыдущих значениях: {}",
-                    reason, e.getMessage(), applied.get().redacted());
+                    reason, e.getMessage(), appliedSettings == null ? "<пула нет>" : appliedSettings.redacted());
             return new ApplyResult(Outcome.REJECTED, List.of("rejected: " + e.getMessage()), null);
         }
 
         HikariSettings current = applied.get();
-        if (!current.sameTarget(target)) {
-            // Смена цели (jdbcUrl/креды) — MBean так не умеет, только пересоздание пула.
+        if (target.maximumPoolSize() == 0) {
+            // Снятие пула (холодная группа R=0, инстанс без доли). Дренаж обязателен:
+            // HikariDataSource.close() убивает активные соединения и ломает запросы в полёте.
+            if (current == null) {
+                // Пул и так не существует — повторный ноль ничего не делает.
+                return new ApplyResult(Outcome.UNCHANGED, List.of(), target);
+            }
+            return closePool(target, current, reason);
+        }
+
+        if (current == null) {
+            // Пула ещё нет (старт с локальным максимумом 0): первый принятый конфиг создаёт его.
+            warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
+            create(target, reason);
+            return new ApplyResult(Outcome.CREATED, List.of(), applied.get());
+        }
+
+        HikariDataSource ds = dataSource.get();
+        boolean targetChanged = !current.sameTarget(target);
+        if (targetChanged || ds == null) {
+            // Смена цели (jdbcUrl/креды/имя) MBean не умеет — только пересоздание. ds == null бывает
+            // после закрытия (память о последнем конфиге остаётся в applied) — поднимаем пул заново.
             List<String> changes = current.diff(target);
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
             create(target, reason);
-            return new ApplyResult(Outcome.RECREATED, changes, applied.get());
+            return new ApplyResult(targetChanged && ds != null ? Outcome.RECREATED : Outcome.CREATED,
+                    changes, applied.get());
         }
 
         List<String> changes = current.diff(target);
@@ -106,6 +138,21 @@ public class ManagedPool implements DataSource, AutoCloseable {
                 reason, target.poolName(), String.join(", ", changes), target.maximumPoolSize(),
                 target.minimumIdle(), runtime().total());
         return new ApplyResult(Outcome.RESIZED, changes, target);
+    }
+
+    /** Честное закрытие пула (целевой максимум 0): дренаж активных, потом close. */
+    private ApplyResult closePool(HikariSettings target, HikariSettings current, String reason) {
+        HikariDataSource ds = dataSource.getAndSet(null);
+        if (ds != null) {
+            closeQuietly(ds);
+            log.info("[{}] пул '{}' закрыт: размер {} -> 0, активные соединения дренированы",
+                    reason, target.poolName(), current.maximumPoolSize());
+        }
+        applied.set(target);
+        lastReason.set(reason);
+        lastChangeAt.set(System.currentTimeMillis());
+        return new ApplyResult(Outcome.CLOSED,
+                List.of("maximumPoolSize: " + current.maximumPoolSize() + " -> 0"), target);
     }
 
     /** Порядок важен: при уменьшении сначала minimumIdle, иначе получим minIdle > max. */
@@ -297,6 +344,22 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     public Runtime runtime() {
         HikariDataSource ds = dataSource.get();
+        if (ds == null) {
+            // Пула нет (ещё не создан или закрыт): честный срез «закрыт, размер 0».
+            HikariSettings s = applied.get();
+            return new Runtime(
+                    s == null ? "нет пула" : s.poolName(),
+                    generation.get(),
+                    true,
+                    0, 0, 0, 0,
+                    s == null ? 0 : s.maximumPoolSize(),
+                    s == null ? 0 : s.minimumIdle(),
+                    createdAt.get(),
+                    lastChangeAt.get(),
+                    lastReason.get(),
+                    resizeCount.get(),
+                    recreateCount.get());
+        }
         HikariPoolMXBean pool = ds.getHikariPoolMXBean();
         return new Runtime(
                 ds.getPoolName(),
@@ -343,24 +406,36 @@ public class ManagedPool implements DataSource, AutoCloseable {
         return ds;
     }
 
+    /**
+     * Пока пула нет (старт с размером 0), вспомогательные методы DataSource-контракта не должны
+     * падать — Spring и актуатор ходят в них ещё до первого конфига из etcd.
+     */
     @Override
     public PrintWriter getLogWriter() throws SQLException {
-        return require().getLogWriter();
+        HikariDataSource ds = dataSource.get();
+        return ds == null ? null : ds.getLogWriter();
     }
 
     @Override
     public void setLogWriter(PrintWriter out) throws SQLException {
-        require().setLogWriter(out);
+        HikariDataSource ds = dataSource.get();
+        if (ds != null) {
+            ds.setLogWriter(out);
+        }
     }
 
     @Override
     public void setLoginTimeout(int seconds) throws SQLException {
-        require().setLoginTimeout(seconds);
+        HikariDataSource ds = dataSource.get();
+        if (ds != null) {
+            ds.setLoginTimeout(seconds);
+        }
     }
 
     @Override
     public int getLoginTimeout() throws SQLException {
-        return require().getLoginTimeout();
+        HikariDataSource ds = dataSource.get();
+        return ds == null ? 0 : ds.getLoginTimeout();
     }
 
     @Override
@@ -370,15 +445,27 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     @Override
     public <T> T unwrap(Class<T> iface) throws SQLException {
-        return iface.isInstance(this) ? iface.cast(this) : require().unwrap(iface);
+        if (iface.isInstance(this)) {
+            return iface.cast(this);
+        }
+        HikariDataSource ds = dataSource.get();
+        if (ds == null) {
+            throw new SQLException("пул закрыт");
+        }
+        return ds.unwrap(iface);
     }
 
     @Override
     public boolean isWrapperFor(Class<?> iface) throws SQLException {
-        return iface.isInstance(this) || require().isWrapperFor(iface);
+        // Отсутствие пула не должно ронять интроспекцию (например, актуаторный db-индикатор).
+        if (iface.isInstance(this)) {
+            return true;
+        }
+        HikariDataSource ds = dataSource.get();
+        return ds != null && ds.isWrapperFor(iface);
     }
 
-    public enum Outcome { CREATED, RESIZED, RECREATED, UNCHANGED, REJECTED }
+    public enum Outcome { CREATED, RESIZED, RECREATED, CLOSED, UNCHANGED, REJECTED }
 
     public record ApplyResult(Outcome outcome, List<String> changes, HikariSettings settings) {}
 

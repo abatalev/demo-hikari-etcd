@@ -410,12 +410,28 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, path);
             reportProblems(parsed.problems(), reason);
 
-            HikariSettings desired = parsed.settings().resolve(defaults);
-            ManagedPool.ApplyResult result = pool.apply(desired, reason);
-            lastOutcome.set(result.outcome());
-            applyCount.incrementAndGet();
-            if (result.outcome() == ManagedPool.Outcome.REJECTED) {
-                lastError.set(String.join("; ", result.changes()));
+            // Инвариант: 0 из etcd недопустим. Пулом управляет провижер — размер 0 он присылает
+            // «не присыланием ключей вовсе», а записанный вручную 0 (или занесённый оверайдом)
+            // отклоняем целиком: пул остаётся на последних рабочих значениях, гейт открыт.
+            Integer etcdMax = parsed.settings().maximumPoolSize();
+            if (etcdMax != null && etcdMax == 0) {
+                ManagedPool.ApplyResult rejected = new ManagedPool.ApplyResult(
+                        ManagedPool.Outcome.REJECTED,
+                        List.of("rejected: maximumPoolSize=0 из etcd недопустим (пулом управляет провижёр)"),
+                        null);
+                lastOutcome.set(rejected.outcome());
+                applyCount.incrementAndGet();
+                lastError.set(String.join("; ", rejected.changes()));
+                log.error("[{}] {}: пул остаётся на последних рабочих значениях",
+                        reason, rejected.changes().get(0));
+            } else {
+                HikariSettings desired = parsed.settings().resolve(defaults);
+                ManagedPool.ApplyResult result = pool.apply(desired, reason);
+                lastOutcome.set(result.outcome());
+                applyCount.incrementAndGet();
+                if (result.outcome() == ManagedPool.Outcome.REJECTED) {
+                    lastError.set(String.join("; ", result.changes()));
+                }
             }
         } catch (InvalidSettingsException e) {
             lastError.set(e.getMessage());

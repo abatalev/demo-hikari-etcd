@@ -49,13 +49,16 @@ service_names = $(if $(S),$(S),$(shell for t in $(foreach t,$(TUPLES),'$(t)'); d
 # Проверка аргумента SIZE до записи в etcd: не число или не положительное — отказ.
 require_positive_int = $(if $(filter-out 0,$(shell test $(2) -gt 0 2>/dev/null && echo ok)),,\
 	@echo "$(1) должен быть положительным числом, а не '$(2)'"; exit 1)
+# Как require_positive_int, но 0 допустим (резерв неактивного флота R=0 = холод).
+require_size = $(if $(filter-out 0,$(shell test $(2) -ge 0 2>/dev/null && echo ok)),,\
+	@echo "$(1) должен быть числом (0 допустим), а не '$(2)'"; exit 1)
 
 # Текущее значение сервисного ключа бюджета из etcd; при недоступном etcd — «ok» (проверку пропускаем:
 # запись всё равно не пройдёт, а решение провижёра — fail-closed с WARN в его логах).
 current_min = $(or $(shell $(COMPOSE) run --rm --no-deps -T etcdctl \
-	get "$(ETCD_ROOT)/services/$(1)/minConnections" 2>/dev/null | sed -n '2p'),ok)
+	get "$(ETCD_ROOT)/services/$(1)/activeMinConnections" 2>/dev/null | sed -n '2p'),ok)
 current_max = $(or $(shell $(COMPOSE) run --rm --no-deps -T etcdctl \
-	get "$(ETCD_ROOT)/services/$(1)/maxConnections" 2>/dev/null | sed -n '2p'),ok)
+	get "$(ETCD_ROOT)/services/$(1)/activeMaxConnections" 2>/dev/null | sed -n '2p'),ok)
 conflicts_with_min = $(shell test $(1) -le $(call current_min,$(2)) 2>/dev/null && echo yes)
 exceeds_budget = $(shell test $(1) -gt $(call current_max,$(2)) 2>/dev/null && echo yes)
 
@@ -110,30 +113,53 @@ stress: ## разовый прогон нагрузки через lb-a (DURATIO
 
 # --- ручные правки конфигурации в etcd ---
 # Адресация: I=имя инстанса (один), S=имя сервиса, G=имя группы.
-# Размер пула задаётся бюджетом сервиса (set-max-connections) — провижёр делит его между живыми
-# инстансами. set-size/set-service-size/set-group-size пишут maximumPoolSize напрямую и живут до
-# ближайшего пересчёта: это временный оверайд, а не способ задать размер пула.
+# Размер пула задаётся бюджетом сервиса (set-active-max-connections): провижёр делит его между
+# живыми инстансами активных групп, а группы с флагом неактивности (set-group-active ACTIVE=false,
+# глобальный флот {root}/groups/) сжимаются до резерва set-inactive-max-connections.
+# set-size/set-service-size/set-group-size пишут maximumPoolSize напрямую и живут до ближайшего
+# пересчёта: это временный оверайд, а не способ задать размер пула (ручной 0 провижёр с трением
+# перезапишет/оставит службе, см. docs/mechanism.md).
 
-.PHONY: set-max-connections
-set-max-connections: ## бюджет соединений сервиса: make set-max-connections SIZE=100 S=service-a
+.PHONY: set-active-max-connections
+set-active-max-connections: ## бюджет соединений сервиса N: make set-active-max-connections SIZE=100 S=service-a
 	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
 	@$(call require_positive_int,SIZE,$(SIZE))
 	@$(if $(call conflicts_with_min,$(SIZE),$(S)),@echo "минимум сервиса ($(call current_min,$(S))) выше бюджета ($(SIZE)):"; \
 		echo "часть инстансов останется без доли и не будет обслуживать трафик (503)"; exit 1)
-	@echo "etcd: $(ETCD_ROOT)/services/$(S)/maxConnections = $(SIZE)"
-	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/maxConnections" "$(SIZE)"
+	@echo "etcd: $(ETCD_ROOT)/services/$(S)/activeMaxConnections = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/activeMaxConnections" "$(SIZE)"
 	@sleep 1
 	@$(MAKE) --no-print-directory budget
 	@$(MAKE) --no-print-directory pool
 
-.PHONY: set-min-connections
-set-min-connections: ## минимальная доля инстанса: make set-min-connections SIZE=15 S=service-a
+.PHONY: set-active-min-connections
+set-active-min-connections: ## минимальная доля активного инстанса: make set-active-min-connections SIZE=15 S=service-a
 	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
 	@$(call require_positive_int,SIZE,$(SIZE))
 	@$(if $(call exceeds_budget,$(SIZE),$(S)),@echo "минимум ($(SIZE)) выше бюджета сервиса ($(call current_max,$(S))):"; \
 		echo "провижёр не выполнит распределение и оставит конфигурацию как есть (WARN в его логах)"; exit 1)
-	@echo "etcd: $(ETCD_ROOT)/services/$(S)/minConnections = $(SIZE)"
-	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/minConnections" "$(SIZE)"
+	@echo "etcd: $(ETCD_ROOT)/services/$(S)/activeMinConnections = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/activeMinConnections" "$(SIZE)"
+	@sleep 1
+	@$(MAKE) --no-print-directory budget
+	@$(MAKE) --no-print-directory pool
+
+.PHONY: set-inactive-max-connections
+set-inactive-max-connections: ## резерв неактивного флота R: make set-inactive-max-connections SIZE=0 S=service-a (0 = холод)
+	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
+	@$(call require_size,SIZE,$(SIZE))
+	@echo "etcd: $(ETCD_ROOT)/services/$(S)/inactiveMaxConnections = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/inactiveMaxConnections" "$(SIZE)"
+	@sleep 1
+	@$(MAKE) --no-print-directory budget
+	@$(MAKE) --no-print-directory pool
+
+.PHONY: set-group-active
+set-group-active: ## флаг активности группы (глобальный флот): make set-group-active G=group-2 ACTIVE=false
+	@$(if $(G),,@echo "укажи G=имя группы"; exit 1)
+	@$(if $(filter true false,$(ACTIVE)),,@echo "ACTIVE должен быть true или false"; exit 1)
+	@echo "etcd: $(ETCD_ROOT)/groups/$(G)/active = $(ACTIVE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/groups/$(G)/active" "$(ACTIVE)"
 	@sleep 1
 	@$(MAKE) --no-print-directory budget
 	@$(MAKE) --no-print-directory pool
@@ -175,11 +201,11 @@ config: ## ключи инстанса из etcd: make config [I=имя]
 	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(call tuple_path,$(call tuple_by_I,$(I)))"
 
 .PHONY: budget
-budget: ## бюджет сервиса: N, m, число живых инстансов, сумма долей (make budget [S=сервис])
+budget: ## бюджет сервисов: N, m, R, маркеры групп, живые инстансы, сумма долей (make budget [S=сервис])
 	@$(foreach s,$(call service_names),\
 		printf "== %s ==\n" "$(s)"; \
-		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/$(s)/" -w json \
-			| python3 scripts/budget.py '$(call tuples_by_serv,$(s))' "$(ETCD_ROOT)/services/$(s)/"; )
+		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/" -w json \
+			| python3 scripts/budget.py '$(call tuples_by_serv,$(s))' "$(ETCD_ROOT)/"; )
 
 .PHONY: registrations
 registrations: ## узлы регистрации инстансов в etcd: создаются при старте, исчезают при остановке

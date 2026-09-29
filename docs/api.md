@@ -1,6 +1,7 @@
 # API: примеры ответов и разбор полей
 
-Все примеры сняты с живого стенда (`make up`, пул 10, нагрузчик с 4 потоками), не выдуманы.
+Все примеры сняты с живого стенда (`make up`, дефолт 8 инстансов по 25 — бюджет по 100 на сервис,
+нагрузчик с 4 потоками), не выдуманы.
 
 Общее для всех ответов: `spring.jackson.default-property-inclusion: non_null` в `application.yml:8`
 выбрасывает `null`-поля. Поэтому отсутствие ключа означает «нет значения», а не «значение null».
@@ -12,46 +13,46 @@
 ```json
 {
   "pool": {
-    "poolName": "pool-service",
+    "poolName": "service-a-group-1-1",
     "generation": 1,
     "closed": false,
-    "total": 10,
+    "total": 25,
     "active": 4,
-    "idle": 6,
+    "idle": 21,
     "threadsAwaitingConnection": 0,
-    "maximumPoolSize": 10,
-    "minimumIdle": 10,
+    "maximumPoolSize": 25,
+    "minimumIdle": 25,
     "createdAtEpochMs": 1790588803069,
     "lastChangeEpochMs": 1790588803885,
     "lastChangeReason": "etcd-снапшот@5",
-    "resizeCount": 1,
+    "resizeCount": 0,
     "recreationCount": 0
   },
   "config": {
     "jdbcUrl": "jdbc:postgresql://postgres:5432/demo",
     "username": "app",
     "password": "***",
-    "poolName": "pool-service",
-    "maximumPoolSize": 10,
-    "minimumIdle": 10,
+    "poolName": "service-a-group-1-1",
+    "maximumPoolSize": 25,
+    "minimumIdle": 25,
     "connectionTimeoutMs": 3000,
     "idleTimeoutMs": 600000,
     "maxLifetimeMs": 1800000,
     "validationTimeoutMs": 5000,
     "leakDetectionThresholdMs": 0
   },
-  "postgres": { "sessions": 10, "active": 5, "idle": 5 },
+  "postgres": { "sessions": 25, "active": 4, "idle": 21 },
   "etcd": {
     "enabled": true,
     "connected": true,
     "endpoints": ["http://etcd:2379"],
     "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/",
-    "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
+    "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "25" },
     "problems": {},
     "revision": 5,
     "lastEventEpochMs": 0,
     "applyCount": 1,
-    "lastOutcome": "RESIZED"
+    "lastOutcome": "CREATED"
   }
 }
 ```
@@ -61,7 +62,7 @@
 | поле | что это |
 |---|---|
 | `generation` | сколько раз пул создавался за жизнь процесса. `1` = ни разу не пересоздавался, `2` = было пересоздание из-за смены `jdbcUrl`/кредов |
-| `closed` | `false` у живого пула; `ManagedPool.close()` обнуляет ссылку, дальше любой `getConnection()` бросит `IllegalStateException` |
+| `closed` | `false` у живого пула; `true`, когда пула нет (старт до первого конфига, инстанс без доли, холодный флот `R=0`) — `ManagedPool.close()` обнуляет ссылку, дальше любой `getConnection()` бросит `IllegalStateException` |
 | `total` | физически открытых соединений. **Не равно `maximumPoolSize`**: растёт до него по мере надобности, если `eager-fill-on-resize=false` |
 | `active` | сейчас занято запросами. При `total` = 10 и `active` = 4 четыре потока нагрузчика держат коннекты в `pg_sleep` |
 | `idle` | свободные соединения. `total = active + idle` |
@@ -99,7 +100,7 @@
 
 | поле | что это |
 |---|---|
-| `enabled` | `false`, если `ETCD_ENABLED=false`: пул живёт на локальных дефолтах, etcd не опрашивается вообще |
+| `enabled` | `false`, если `ETCD_ENABLED=false`: etcd не опрашивается вообще, пула нет (локальный максимум жёстко 0) |
 | `connected` | `running && connected`. **`false` означает, что watch не работает прямо сейчас** — и это единственный признак, по которому отличают «etcd недоступен» от «событий просто не было» |
 | `path` | путь конфигурации этого инстанса: `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/`. **Отсутствует при `enabled: false`** — путь не собирается, когда источник выключен (non_null) |
 | `keys` | снимок того, что сервис видит в etcd. Не пусто, а частично — например, в примере выше только два ключа, потому что config-provisioner кладёт `maximumPoolSize` и `connectionTimeoutMs` |
@@ -107,7 +108,7 @@
 | `revision` | ревизия etcd, на которой сервис находится. Растёт на каждом изменении; **не меняется — значит watch жив и просто ничего не происходит** |
 | `lastEventEpochMs` | время последнего события watch. `0` — событий не было, применён только снимок при старте. Это не ошибка, но при `connected: false` означает «данные могут быть протухшими» |
 | `applyCount` | сколько раз применялся конфиг. Растёт и на ресайзе, и на отклонённом конфиге |
-| `lastOutcome` | итог последнего apply: `CREATED`, `RESIZED`, `RECREATED`, `UNCHANGED`, `REJECTED` |
+| `lastOutcome` | итог последнего apply: `CREATED`, `RESIZED`, `RECREATED`, `CLOSED` (целевой размер 0 — пул снят с дренажом), `UNCHANGED`, `REJECTED` |
 | `lastError` | появляется только при проблеме: ошибка etcd, compaction, либо список причин от `REJECTED` |
 | `notReadyReason` | почему закрыт гейт трафика: «конфигурация не получена: в пути … нет распознанных ключей» или «…: etcd недоступен (…)». Отдельное поле, не перекрывает `lastError`; отсутствует, когда источник выключен или трафик открыт |
 
@@ -120,15 +121,15 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
 его не читает. Регистрацию смотрят по ключам etcd: `make registrations` (см.
 [operations.md](operations.md#регистрация-инстансов)).
 
-**Про `lastOutcome: RESIZED` на старте.** В примере выше пул ничего не менял, но `lastOutcome`
-не `UNCHANGED`. Это не ошибка: локальный дефолт `connectionTimeoutMs` в `application.yml:28` —
-30000, а config-provisioner кладёт 3000, поэтому первый apply честно приводит пул к etcd-значению.
-Ориентироваться надо на `pool.lastChangeReason`, он показывает источник изменения.
+**Про `lastOutcome: CREATED` на старте.** В примере выше пул появился из первого же снимка. Это
+нормально: локальный максимум пула жёстко 0 — до конфигурации пула нет, а первый снимок от
+провижора приносит долю бюджета, на которой пул создаётся. Ориентироваться надо на
+`pool.lastChangeReason`, он показывает источник изменения.
 
 Проверяется так: запустите сервис локально с `ETCD_ENABLED=false` (см.
-[operations.md](operations.md#режим-без-etcd)) — в `config` будет `connectionTimeoutMs=30000`,
-дефолт из `application.yml`. С etcd, у которого в префиксе лежит 3000, на старте придёт
-`3000` и `lastOutcome: RESIZED`.
+[operations.md](operations.md#режим-без-etcd)) — пула не будет вовсе: в `/api/pool` `pool.closed=true`,
+`pool.maximumPoolSize=0`, а `config` отсутствует целиком, `etcd.applyCount=0`. С etcd пул создаётся
+из первого конфига, и `lastOutcome` будет `CREATED`.
 
 ## Поведение при `ETCD_ENABLED=false`
 
@@ -152,6 +153,8 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
 `enabled: true` при `connected: false` — вот это уже проблема, смотрите `lastError`.
 Поле `lastOutcome` отсутствует целиком: apply не происходил, а `null`-поля выбрасываются.
 `path` и `notReadyReason` тоже отсутствуют: при выключенном источнике путь не собирается.
+Пула нет тоже: локальный максимум жёстко 0, поэтому в `/api/pool` `pool.closed=true`,
+`pool.maximumPoolSize=0`, а `config` отсутствует целиком.
 
 ## `GET /api/config`
 
@@ -164,12 +167,12 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
   "connected": true,
   "endpoints": ["http://etcd:2379"],
   "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/",
-  "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "10" },
+  "keys": { "connectionTimeoutMs": "3000", "maximumPoolSize": "25" },
   "problems": {},
   "revision": 5,
   "lastEventEpochMs": 0,
   "applyCount": 1,
-  "lastOutcome": "RESIZED"
+  "lastOutcome": "CREATED"
 }
 ```
 
@@ -186,8 +189,8 @@ etcd-клиент, прилетел `REJECTED`-конфиг, не удалось
   "queueWaitMs": 0,
   "rows": 2000,
   "pool": {
-    "maximumPoolSize": 10, "minimumIdle": 10,
-    "total": 10, "active": 4, "idle": 6,
+    "maximumPoolSize": 25, "minimumIdle": 25,
+    "total": 25, "active": 4, "idle": 21,
     "threadsAwaitingConnection": 0
   }
 }

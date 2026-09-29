@@ -45,9 +45,34 @@ class HikariSettingsTest {
     }
 
     @Test
-    void poolSizeOutOfRangeIsRejected() {
+    void zeroPoolSizeIsAcceptedAsLocalDefault() {
+        // Локальный дефолт максимума — 0: пула нет, пока не пришёл конфиг из etcd.
         HikariSettings settings = new HikariSettings("jdbc:postgresql://x/y", "app", "app", "pool",
-                0, 0, 30_000L, 600_000L, 1_800_000L, 5_000L, 0L);
+                0, null, 30_000L, 600_000L, 1_800_000L, 5_000L, 0L);
+
+        HikariSettings.Normalized normalized = settings.normalize();
+
+        assertThat(normalized.settings().maximumPoolSize()).isZero();
+        // minimumIdle следует за максимумом и при нуле: пула нет — и idle-соединений нет.
+        assertThat(normalized.settings().minimumIdle()).isZero();
+        // «idleTimeout не применим» при максимуме 0 не выдаётся: пула нет, ворчать нечего.
+        assertThat(normalized.warnings()).doesNotContain("idleTimeout не применим: minimumIdle == maximumPoolSize");
+    }
+
+    @Test
+    void negativePoolSizeIsRejected() {
+        HikariSettings settings = new HikariSettings("jdbc:postgresql://x/y", "app", "app", "pool",
+                -1, -1, 30_000L, 600_000L, 1_800_000L, 5_000L, 0L);
+
+        assertThatThrownBy(settings::normalize)
+                .isInstanceOf(InvalidSettingsException.class)
+                .hasMessageContaining("maximumPoolSize");
+    }
+
+    @Test
+    void overMaxPoolSizeIsRejected() {
+        HikariSettings settings = new HikariSettings("jdbc:postgresql://x/y", "app", "app", "pool",
+                201, 201, 30_000L, 600_000L, 1_800_000L, 5_000L, 0L);
 
         assertThatThrownBy(settings::normalize)
                 .isInstanceOf(InvalidSettingsException.class)

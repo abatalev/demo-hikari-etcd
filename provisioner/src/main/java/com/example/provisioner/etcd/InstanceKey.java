@@ -9,10 +9,13 @@ package com.example.provisioner.etcd;
  * Узел хранится с пустым значением и хвостовым слешем, поэтому разбор принимает ключ узла как
  * с хвостовым слешем, так и без него.
  *
- * <p>На уровне сервиса живут ещё два ключа бюджета соединений —
- * {@code {root}/services/{service}/maxConnections} и {@code .../minConnections}. Это не узлы
+ * <p>На уровне сервиса живут три ключа бюджета соединений —
+ * {@code {root}/services/{service}/activeMaxConnections},
+ * {@code .../activeMinConnections} и {@code .../inactiveMaxConnections}. Это не узлы
  * регистрации: они не создают сервис и не увеличивают число живых инстансов, но по событию
- * изменения запускают пересчёт распределения бюджета.
+ * изменения запускают пересчёт распределения бюджета. Тройка такая же, как в старых
+ * {@code maxConnections}/{@code minConnections}: бюджета активного флота, минимальной доли
+ * инстанса и резерва — размера пула неактивных групп (глобальный флот {@code {root}/groups/}).
  *
  * <p>Ключи {@code hikari/} провизор обязан игнорировать (их пишет он сам и оператор);
  * всё, что не узел, не ключ конфигурации и не сервисная настройка, — мусор/опечатка, его тоже
@@ -21,9 +24,11 @@ package com.example.provisioner.etcd;
 public final class InstanceKey {
 
     /** Распознанные сервисные настройки бюджета соединений. */
-    public static final String MAX_CONNECTIONS = "maxConnections";
+    public static final String ACTIVE_MAX_CONNECTIONS = "activeMaxConnections";
 
-    public static final String MIN_CONNECTIONS = "minConnections";
+    public static final String ACTIVE_MIN_CONNECTIONS = "activeMinConnections";
+
+    public static final String INACTIVE_MAX_CONNECTIONS = "inactiveMaxConnections";
 
     /** Результат разбора полного ключа. */
     public sealed interface Parsed permits Node, Config, ServiceSetting, Other {
@@ -39,7 +44,8 @@ public final class InstanceKey {
 
     /**
      * Ключ — сервисная настройка бюджета соединений {@code {root}/services/{service}/{setting}},
-     * где setting — {@link #MAX_CONNECTIONS} или {@link #MIN_CONNECTIONS}.
+     * где setting — {@link #ACTIVE_MAX_CONNECTIONS}, {@link #ACTIVE_MIN_CONNECTIONS} или
+     * {@link #INACTIVE_MAX_CONNECTIONS}.
      */
     public record ServiceSetting(String service, String setting) implements Parsed {
     }
@@ -109,7 +115,8 @@ public final class InstanceKey {
 
     /** Распознанная сервисная настройка бюджета или {@link Other} (мусор/опечатка). */
     private static Parsed parseServiceSetting(String service, String setting) {
-        if (MAX_CONNECTIONS.equals(setting) || MIN_CONNECTIONS.equals(setting)) {
+        if (ACTIVE_MAX_CONNECTIONS.equals(setting) || ACTIVE_MIN_CONNECTIONS.equals(setting)
+                || INACTIVE_MAX_CONNECTIONS.equals(setting)) {
             return new ServiceSetting(service, setting);
         }
         return new Other();

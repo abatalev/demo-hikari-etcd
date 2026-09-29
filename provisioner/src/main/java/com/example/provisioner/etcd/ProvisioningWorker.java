@@ -35,11 +35,15 @@ import org.slf4j.LoggerFactory;
  * тогда и только тогда, когда существует его узел и узел получил долю сервисного бюджета» внутри
  * поддерева {@code {root}/services/{service}/}.
  *
- * <p>Бюджет N читается из сервисного ключа {@code {root}/services/{service}/maxConnections} и
- * делится равномерно между живыми инстансами, сумма долей равна N. Минимум m
- * ({@code .../minConnections}) ограничивает состав снизу: инстанс без доли остаётся без
- * конфигурации и потому не обслуживает трафик. {@code maximumPoolSize} — управляемый ключ,
- * остальные ключи инстанса создаются по принципу «ключа нет → put» и ручных правок не трогают.
+ * <p>Флот групп — глобальный: маркеры активности живут вне поддерева сервиса, под
+ * {@code {root}/groups/{group}/active}. Инстансы неактивных групп сжимаются до резерва R
+ * (сервисный ключ {@code inactiveMaxConnections}; 0 = холод, конфигурации нет вовсе), активные
+ * делят остаток бюджета: активным достаётся {@code N − R×k}, сумма долей по сервису равна N.
+ * Бюджет N и минимум m читаются из {@code activeMaxConnections}/{@code activeMinConnections};
+ * {@code maximumPoolSize} — управляемый ключ, остальные ключи инстанса создаются по принципу
+ * «ключа нет → put» и ручных правок не трогают. Маркеры поллятся отдельным потоком ~1с: события
+ * {@code {root}/groups/} watch поддерева не видит, а при обрыве etcd воркер держит последнее
+ * известное состояние флота.
  *
  * <p>Запускается и останавливается циклом выборов лидера ({@link ConfigProvisioner}): пока реплика
  * ведёт сервис, воркер крутит сверку + watch с revision+1 (никакого окна между снимком и
@@ -51,6 +55,9 @@ final class ProvisioningWorker implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(ProvisioningWorker.class);
 
+    /** Период поллинга маркеров групп {@code {root}/groups/} — пересчёт по смене флага группы. */
+    private static final long GROUP_POLL_MS = 1_000L;
+
     /** Снимок поддерева сервиса: чего в нём живого, что осталось от конфигурации, каков бюджет. */
     private static final class Tree {
 
@@ -61,6 +68,8 @@ final class ProvisioningWorker implements Runnable {
         private final Set<String> configPrefixes = new HashSet<>();
         /** Значения сервисных ключей бюджета по имени настройки. */
         private final Map<String, String> budget = new HashMap<>();
+        /** Имена групп этого сервиса, помеченных inactive (маркер равен «false»). */
+        private final Set<String> inactiveGroups = new HashSet<>();
 
         private Tree(long revision) {
             this.revision = revision;
@@ -76,7 +85,13 @@ final class ProvisioningWorker implements Runnable {
     private final AtomicBoolean active = new AtomicBoolean();
     private final Set<String> warnedUnknownKeys = new HashSet<>();
 
+    /** Последнее известное состояние маркеров групп (группа → активна); под {@link #lock}. */
+    private Map<String, Boolean> lastFleetMarkers = new HashMap<>();
+    /** Группы, к которым относятся узлы этого сервиса; обновляется в {@link #scan}. */
+    private volatile Set<String> myGroups = Set.of();
+
     private volatile Thread thread;
+    private volatile Thread pollThread;
 
     ProvisioningWorker(ConfigProvisioner owner, String service) {
         this.owner = owner;
@@ -92,15 +107,24 @@ final class ProvisioningWorker implements Runnable {
                 .name("provision-worker-" + service)
                 .unstarted(this);
         thread.start();
+        pollThread = Thread.ofPlatform()
+                .daemon(true)
+                .name("provision-fleet-" + service)
+                .unstarted(this::fleetPollLoop);
+        pollThread.start();
         log.info("воркер сервиса {} запущен на поддереве {}", service, subtreePrefix);
     }
 
-    /** Остановка воркера: снимает флаг активности и прерывает цикл (watch закроется). */
+    /** Остановка воркера: снимает флаг активности и прерывает оба цикла (watch закроется). */
     void stop() {
         active.set(false);
         Thread t = thread;
         if (t != null) {
             t.interrupt();
+        }
+        Thread p = pollThread;
+        if (p != null) {
+            p.interrupt();
         }
     }
 
@@ -137,9 +161,8 @@ final class ProvisioningWorker implements Runnable {
     }
 
     /**
-     * Полная сверка поддерева сервиса: обеспечение ключей бюджета, раздача долей всем живым узлам
-     * и очистка всего, что конфигурацией не обеспечено. Возвращает revision снимка — watch
-     * стартует с revision+1.
+     * Полная сверка поддерева сервиса: обеспечение ключей бюджета и раздача долей. Возвращает
+     * revision снимка — watch стартует с revision+1.
      */
     private long reconcile(Client c) throws Exception {
         Tree snapshot = scan(c);
@@ -175,45 +198,189 @@ final class ProvisioningWorker implements Runnable {
                 warnUnknownKey(key);
             }
         }
+
+        // Маркеры активности групп лежат вне поддерева — читаем их отдельным снимком.
+        Map<String, Boolean> fleet = readFleetMarkers(c);
+        for (Map.Entry<String, Boolean> entry : fleet.entrySet()) {
+            if (!entry.getValue()) {
+                tree.inactiveGroups.add(entry.getKey());
+            }
+        }
+        Set<String> groups = new HashSet<>();
+        for (InstanceKey.Node node : tree.nodes.values()) {
+            groups.add(node.group());
+        }
+        myGroups = groups;
         return tree;
     }
 
     /**
-     * Пересчёт сервиса: обеспечение сервисных ключей бюджета, раздача долей и очистка всего, что
-     * конфигурацией не обеспечено. Вызывается под {@link #lock} — два источника событий (сверка и
-     * watch) не должны считать состав одновременно.
+     * Снимок маркеров глобального флота групп {@code {root}/groups/}: группа → активна ли.
+     * Отсутствующий маркер трактуется как активна; ключи префикса, отличные от
+     * {@code {group}/active}, — мусор/опечатка, логируются один раз.
+     */
+    private Map<String, Boolean> readFleetMarkers(Client c) throws Exception {
+        GetResponse resp = c.getKVClient()
+                .get(ConfigProvisioner.bs(GroupFleetKey.groupsPrefix(owner.properties().getRoot())),
+                        GetOption.newBuilder().isPrefix(true).build())
+                .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
+        Map<String, Boolean> markers = new HashMap<>();
+        for (KeyValue kv : resp.getKvs()) {
+            String key = kv.getKey().toString(StandardCharsets.UTF_8);
+            String value = kv.getValue().toString(StandardCharsets.UTF_8);
+            GroupFleetKey.Parsed parsed = GroupFleetKey.parse(owner.properties().getRoot(), key);
+            if (parsed instanceof GroupFleetKey.Marker m) {
+                markers.put(m.group(), GroupFleetKey.isActive(value));
+            } else {
+                warnUnknownKey(key);
+            }
+        }
+        return markers;
+    }
+
+    /**
+     * Поллинг маркеров флота: события {@code {root}/groups/} не видны watch поддерева, поэтому
+     * флаги групп догоняются опросом. Смена затрагивает этот сервис — пересчёт; обрыв etcd тики
+     * пропускает, состояние флота остаётся последним известным (смотрится в новом снимке после
+     * восстановления).
+     */
+    private void fleetPollLoop() {
+        long backoffMs = owner.properties().getRetryInitialBackoff().toMillis();
+        while (active.get()) {
+            try {
+                Client c = owner.client();
+                Map<String, Boolean> fresh = readFleetMarkers(c);
+                synchronized (lock) {
+                    Map<String, Boolean> prev = lastFleetMarkers;
+                    lastFleetMarkers = fresh;
+                    if (!fresh.equals(prev) && fleetChangedForUs(prev, fresh)) {
+                        log.info("сервис {}: маркеры групп изменились, пересчитываю распределение", service);
+                        recompute();
+                    }
+                }
+                backoffMs = owner.properties().getRetryInitialBackoff().toMillis();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                // Обрыв etcd: пул/конфигурация живут на последнем состоянии, тики пропускаем.
+                log.debug("воркер сервиса {}: маркеры групп не прочитаны ({}), повтор через {} мс",
+                        service, e.toString(), backoffMs);
+                if (!owner.sleep(backoffMs)) {
+                    return;
+                }
+                backoffMs = Math.min(backoffMs * 2, owner.properties().getRetryMaxBackoff().toMillis());
+            }
+            if (!owner.sleep(GROUP_POLL_MS)) {
+                return;
+            }
+        }
+    }
+
+    /** Изменилось ли состояние маркеров групп, к которым относятся узлы этого сервиса. */
+    private boolean fleetChangedForUs(Map<String, Boolean> prev, Map<String, Boolean> fresh) {
+        Set<String> mine = myGroups;
+        for (String group : mine) {
+            if (!java.util.Objects.equals(prev.get(group), fresh.get(group))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Пересчёт сервиса: обеспечение сервисных ключей бюджета, партиционирование инстансов на
+     * активные/неактивные по маркерам глобального флота, раздача долей (неактивным — ровно R,
+     * активным — остаток бюджета) и очистка всего, что конфигурацией не обеспечено. Вызывается
+     * под {@link #lock} — три источника событий (сверка, watch, поллер маркеров) не должны
+     * считать состав одновременно.
      */
     private void apply(Client c, Tree tree) throws Exception {
-        Integer budget = budgetValue(c, InstanceKey.MAX_CONNECTIONS,
-                owner.properties().getMaxConnections(), tree);
-        Integer min = budgetValue(c, InstanceKey.MIN_CONNECTIONS,
-                owner.properties().getMinConnections(), tree);
-        if (budget == null || min == null) {
+        Integer budget = budgetValue(c, InstanceKey.ACTIVE_MAX_CONNECTIONS,
+                owner.properties().getActiveMaxConnections(), tree);
+        Integer min = budgetValue(c, InstanceKey.ACTIVE_MIN_CONNECTIONS,
+                owner.properties().getActiveMinConnections(), tree);
+        Integer reserve = budgetValue(c, InstanceKey.INACTIVE_MAX_CONNECTIONS,
+                owner.properties().getInactiveMaxConnections(), tree);
+        if (budget == null || min == null || reserve == null) {
             // Нечисловое значение сервисного ключа: fail-closed, конфигурацию не трогаем.
-            log.warn("сервис {}: нечисловое значение ключа бюджета ({}/{}), живы {} узлов: "
+            log.warn("сервис {}: нечисловое значение ключа бюджета ({}/{}/{}), живы {} узлов: "
                     + "распределение не выполнено, конфигурация оставлена как есть", service,
-                    InstanceKey.MAX_CONNECTIONS, InstanceKey.MIN_CONNECTIONS, tree.nodes.size());
+                    InstanceKey.ACTIVE_MAX_CONNECTIONS, InstanceKey.ACTIVE_MIN_CONNECTIONS,
+                    InstanceKey.INACTIVE_MAX_CONNECTIONS, tree.nodes.size());
             return;
         }
 
-        List<String> nodeKeys = new ArrayList<>(tree.nodes.keySet());
-        Collections.sort(nodeKeys);
-        PoolSizeDistribution.Result result = PoolSizeDistribution.distribute(budget, min,
-                owner.properties().getMaxShare(), nodeKeys);
-        if (result.refused()) {
-            // Fail-closed: опечатка в etcd не должна обнулить работающий сервис.
-            log.warn("сервис {}: распределение бюджета не выполнено: {} (N={}, m={}, n={}) — "
-                            + "конфигурация оставлена как есть", service, result.refusal(), budget,
-                    min, tree.nodes.size());
+        // Глобальный флот: инстансы неактивных групп сжимаются до резерва R, остальные делят
+        // остаток бюджета N − R×k по прежнему алгоритму.
+        List<String> activeKeys = new ArrayList<>();
+        List<String> inactiveKeys = new ArrayList<>();
+        for (String nodeKey : tree.nodes.keySet()) {
+            InstanceKey.Node node = tree.nodes.get(nodeKey);
+            if (tree.inactiveGroups.contains(node.group())) {
+                inactiveKeys.add(nodeKey);
+            } else {
+                activeKeys.add(nodeKey);
+            }
+        }
+        Collections.sort(activeKeys);
+        Collections.sort(inactiveKeys);
+
+        int maxShare = owner.properties().getMaxShare();
+        int k = inactiveKeys.size();
+        long reserveTotal = (long) reserve * k;
+        long activeBudget = budget - reserveTotal;
+        if (reserve < 0 || reserve > maxShare) {
+            // R вне {0} ∪ [1..maxShare]: fail-closed, конфигурацию не трогаем.
+            log.warn("сервис {}: резерв неактивного флота R={} вне диапазона [0..{}] — "
+                    + "распределение не выполнено, конфигурация оставлена как есть", service,
+                    reserve, maxShare);
             return;
+        }
+        if (reserveTotal > budget) {
+            log.warn("сервис {}: резерв неактивных R={} × k={} = {} превышает бюджет N={} — "
+                    + "распределение не выполнено, конфигурация оставлена как есть", service,
+                    reserve, k, reserveTotal, budget);
+            return;
+        }
+        if (!activeKeys.isEmpty() && activeBudget < min) {
+            log.warn("сервис {}: после резерва активным остаётся {} < минимума m={} (N={}, R={}, "
+                    + "k={}) — распределение не выполнено, конфигурация оставлена как есть",
+                    service, activeBudget, min, budget, reserve, k);
+            return;
+        }
+
+        // Доли: неактивным ровно R (при R=0 доли нет вовсе — холод, конфигурация снимается
+        // протиркой ниже), активным — остаток бюджета по прежнему алгоритму распределения.
+        Map<String, Integer> shares = new HashMap<>();
+        if (k > 0 && reserve > 0) {
+            for (String nodeKey : inactiveKeys) {
+                shares.put(nodeKey, reserve);
+            }
+        }
+        int excess = 0;
+        if (!activeKeys.isEmpty()) {
+            PoolSizeDistribution.Result result = PoolSizeDistribution.distribute(
+                    (int) activeBudget, min, maxShare, activeKeys);
+            if (result.refused()) {
+                // Fail-closed: опечатка в etcd не должна обнулить работающий сервис.
+                log.warn("сервис {}: распределение активного бюджета не выполнено: {} (N={}, "
+                                + "m={}, R={}, k={}) — конфигурация оставлена как есть", service,
+                        result.refusal(), budget, min, reserve, k);
+                return;
+            }
+            excess = result.excess();
+            for (PoolSizeDistribution.Share share : result.shares()) {
+                shares.put(share.nodeKey(), share.size());
+            }
         }
 
         Map<String, String> shareByPrefix = new HashMap<>();
-        for (PoolSizeDistribution.Share share : result.shares()) {
-            InstanceKey.Node node = tree.nodes.get(share.nodeKey());
+        for (Map.Entry<String, Integer> share : shares.entrySet()) {
+            InstanceKey.Node node = tree.nodes.get(share.getKey());
             String prefix = InstanceKey.hikariPrefix(owner.properties().getRoot(),
                     node.service(), node.group(), node.instance());
-            shareByPrefix.put(prefix, String.valueOf(share.size()));
+            shareByPrefix.put(prefix, String.valueOf(share.getValue()));
         }
 
         int resizes = 0;
@@ -223,8 +390,9 @@ final class ProvisioningWorker implements Runnable {
                     String.valueOf(owner.properties().getConnectionTimeoutMs()));
         }
 
-        // Избыток (доля не досталась) и осиротевшие префиксы конфигурации — одинаково не имеют
-        // права на ключи: без них инстанс не обслуживает трафик (503) и не держит соединений.
+        // Избыток (доля не досталась), холод (R=0) и осиротевшие префиксы конфигурации — одинаково
+        // не имеют права на ключи: без них инстанс не обслуживает трафик (503) и не держит
+        // соединений.
         int cleaned = 0;
         Set<String> servedPrefixes = new HashSet<>(shareByPrefix.keySet());
         for (String prefix : tree.configPrefixes) {
@@ -234,11 +402,11 @@ final class ProvisioningWorker implements Runnable {
             }
         }
 
-        if (resizes > 0 || cleaned > 0 || result.excess() > 0) {
-            log.info("пересчёт сервиса {}: бюджет {}, минимум {}, живых узлов {}, обслуживается {}, "
-                            + "избыток {}, изменено размеров {}, очищено префиксов {}",
-                    service, budget, min, tree.nodes.size(), result.shares().size(),
-                    result.excess(), resizes, cleaned);
+        if (resizes > 0 || cleaned > 0 || excess > 0 || k > 0 || !activeKeys.isEmpty()) {
+            log.info("пересчёт сервиса {}: N={}, m={}, R={}, активных {}, неактивных (k) {}, "
+                            + "обслуживается {}, избыток {}, изменено размеров {}, очищено префиксов {}",
+                    service, budget, min, reserve, activeKeys.size(), k, shares.size(),
+                    excess, resizes, cleaned);
         }
     }
 

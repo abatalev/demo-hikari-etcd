@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.poolsvc.etcd.EtcdPoolConfigSource;
+import com.example.poolsvc.pool.HikariSettings;
 import com.example.poolsvc.pool.ManagedPool;
 
 @RestController
@@ -46,9 +47,10 @@ public class PoolController {
 
     @GetMapping("/pool")
     public PoolStatusResponse pool() {
+        HikariSettings settings = pool.settings();
         return new PoolStatusResponse(
                 pool.runtime(),
-                pool.settings().redacted(),
+                settings == null ? null : settings.redacted(),
                 postgresSessions(),
                 configSource.status());
     }

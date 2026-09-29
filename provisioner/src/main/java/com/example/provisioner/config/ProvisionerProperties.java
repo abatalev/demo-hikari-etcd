@@ -23,18 +23,27 @@ public class ProvisionerProperties {
     private String root = "/config";
 
     /**
-     * Бюджет соединений сервиса по умолчанию (ключ {@code {root}/services/{service}/maxConnections},
-     * создаётся put-if-absent при появлении первого узла сервиса). Провижер делит его равномерно
-     * между живыми инстансами, сумма долей равна бюджету.
+     * Бюджет соединений сервиса по умолчанию (ключ {@code {root}/services/{service}/activeMaxConnections},
+     * создаётся put-if-absent при появлении первого узла сервиса). Провижер делит его между
+     * живыми инстансами активных групп (после вычета резерва неактивного флота), сумма долей равна
+     * бюджету.
      */
-    private int maxConnections = 100;
+    private int activeMaxConnections = 100;
 
     /**
-     * Минимальная доля инстанса по умолчанию (ключ {@code .../minConnections}). Инстанс
+     * Минимальная доля инстанса по умолчанию (ключ {@code .../activeMinConnections}). Инстанс
      * обслуживает трафик, только если его доля не меньше этого значения; если бюджета не хватает,
      * часть инстансов остаётся без конфигурации.
      */
-    private int minConnections = 1;
+    private int activeMinConnections = 1;
+
+    /**
+     * Резерв неактивного флота по умолчанию (ключ {@code .../inactiveMaxConnections}): размер пула
+     * каждого инстанса неактивных групп (маркер {@code {root}/groups/{group}/active=false}).
+     * 0 = холод — неактивный инстанс конфигурации не получает вовсе и трафик не обслуживает.
+     * Валиден только 0 или {@code 1..maxShare}; вне диапазона провижёр fail-closed (WARN).
+     */
+    private int inactiveMaxConnections = 1;
 
     /**
      * Верхняя граница доли инстанса. Намеренно зеркалит {@code HikariSettings.POOL_SIZE_MAX} у
@@ -74,20 +83,28 @@ public class ProvisionerProperties {
         this.root = root;
     }
 
-    public int getMaxConnections() {
-        return maxConnections;
+    public int getActiveMaxConnections() {
+        return activeMaxConnections;
     }
 
-    public void setMaxConnections(int maxConnections) {
-        this.maxConnections = maxConnections;
+    public void setActiveMaxConnections(int activeMaxConnections) {
+        this.activeMaxConnections = activeMaxConnections;
     }
 
-    public int getMinConnections() {
-        return minConnections;
+    public int getActiveMinConnections() {
+        return activeMinConnections;
     }
 
-    public void setMinConnections(int minConnections) {
-        this.minConnections = minConnections;
+    public void setActiveMinConnections(int activeMinConnections) {
+        this.activeMinConnections = activeMinConnections;
+    }
+
+    public int getInactiveMaxConnections() {
+        return inactiveMaxConnections;
+    }
+
+    public void setInactiveMaxConnections(int inactiveMaxConnections) {
+        this.inactiveMaxConnections = inactiveMaxConnections;
     }
 
     public int getMaxShare() {

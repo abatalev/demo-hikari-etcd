@@ -5,8 +5,9 @@ import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Локальные дефолты (источник "фолбэк", когда etcd недоступен или ключ не задан).
- * Всё, что приехало из etcd, имеет приоритет над этими значениями.
+ * Локальные дефолты (источник "фолбэк", когда etcd недоступен или ключ не задан). Размер пула
+ * задаётся исключительно etcd: {@code maximumPoolSize} по умолчанию 0, поэтому без конфигурации
+ * пул не создаётся вообще.
  */
 @ConfigurationProperties(prefix = "pool.db")
 public class DbProperties {
@@ -16,7 +17,11 @@ public class DbProperties {
     private String password = "app";
     private String poolName = "pool-service";
 
-    private Integer maximumPoolSize = 10;
+    /**
+     * Размер пула приходит только из etcd (провижер делит сервисный бюджет); локальный дефолт
+     * жёстко 0 — пула нет, пока не пришла конфигурация. 0 из etcd источник отклоняет (REJECTED).
+     */
+    private Integer maximumPoolSize = 0;
     /** null = "держаться за maximumPoolSize" ( HikariCP так и делает по умолчанию). */
     private Integer minimumIdle = null;
     private Long connectionTimeoutMs = 30_000L;

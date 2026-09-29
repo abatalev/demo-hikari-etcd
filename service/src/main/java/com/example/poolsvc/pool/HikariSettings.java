@@ -29,6 +29,12 @@ public record HikariSettings(
         Long leakDetectionThresholdMs) {
 
     public static final int POOL_SIZE_MIN = 1;
+    /**
+     * Верхняя граница размера пула. Нижняя граница локального дефолта — 0 (пула нет: размер
+     * приходит только из etcd, а 0 из хранилища отклоняется источником до resolve — см.
+     * {@code EtcdPoolConfigSource.apply}), поэтому валидация максимума идёт на [0..POOL_SIZE_MAX],
+     * а {@link #POOL_SIZE_MIN} остаётся смысловой границей «живого» пула.
+     */
     public static final int POOL_SIZE_MAX = 200;
 
     private static final long CONNECTION_TIMEOUT_MIN_MS = 250;
@@ -79,7 +85,7 @@ public record HikariSettings(
         }
         String name = require(poolName, "poolName");
 
-        int max = intInRange(maximumPoolSize, "maximumPoolSize", POOL_SIZE_MIN, POOL_SIZE_MAX);
+        int max = intInRange(maximumPoolSize, "maximumPoolSize", 0, POOL_SIZE_MAX);
         int minIdle = maximumPoolSize == null
                 ? POOL_SIZE_MIN
                 : (minimumIdle == null ? maximumPoolSize : minimumIdle);
@@ -98,7 +104,8 @@ public record HikariSettings(
         long leakDetection = longZeroOrRange(leakDetectionThresholdMs, "leakDetectionThresholdMs",
                 LEAK_DETECTION_MIN_MS, LEAK_DETECTION_MAX_MS);
 
-        if (idleTimeout > 0 && minIdle == max) {
+        if (max > 0 && idleTimeout > 0 && minIdle == max) {
+            // При максимуме 0 пула нет вовсе — предупреждение о сочетании минимума таймаута не нужно.
             warnings.add("idleTimeout не применим: minimumIdle == maximumPoolSize");
         }
         if (leakDetection > 0 && leakDetection >= connectionTimeout) {

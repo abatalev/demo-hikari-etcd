@@ -13,8 +13,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class PoolBeansConfiguration {
 
     /**
-     * Пул создаётся сразу на локальных дефолтах, чтобы сервис поднялся даже без etcd.
-     * Дальше конфиг из etcd дотюнивает этот же пул на лету.
+     * Пул создаётся только из конфигурации etcd: локальный дефолт максимума 0, поэтому при старте
+     * пула нет вовсе. Первый принятый конфиг от провижера создаёт пул; нулевой целевой размер
+     * (холодная группа, снятие конфигурации) закрывает его с дренажом.
      */
     @Bean(destroyMethod = "close")
     ManagedPool managedPool(DbProperties properties) {
