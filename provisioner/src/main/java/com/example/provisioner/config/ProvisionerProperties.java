@@ -1,5 +1,7 @@
 package com.example.provisioner.config;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -29,6 +31,15 @@ public class ProvisionerProperties {
     private Duration callTimeout = Duration.ofSeconds(5);
     private Duration retryInitialBackoff = Duration.ofSeconds(1);
     private Duration retryMaxBackoff = Duration.ofSeconds(30);
+
+    /**
+     * Имя реплики провизора: значение лидер-ключа выборов и пометка в логах.
+     * Пустое значение → фолбэк на hostname (уникален в compose и в Kubernetes).
+     */
+    private String name = "";
+
+    /** TTL аренды выборов лидера: после потери keepalive лидерство уходит за это время. */
+    private Duration leaderTtl = Duration.ofSeconds(10);
 
     public List<String> getEndpoints() {
         return endpoints;
@@ -84,5 +95,33 @@ public class ProvisionerProperties {
 
     public void setRetryMaxBackoff(Duration retryMaxBackoff) {
         this.retryMaxBackoff = retryMaxBackoff;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Duration getLeaderTtl() {
+        return leaderTtl;
+    }
+
+    public void setLeaderTtl(Duration leaderTtl) {
+        this.leaderTtl = leaderTtl;
+    }
+
+    /** Имя реплики: явное {@code PROV_NAME}, иначе hostname, иначе «provisioner». */
+    public String resolveName() {
+        if (name != null && !name.isBlank()) {
+            return name.trim();
+        }
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            return "provisioner";
+        }
     }
 }

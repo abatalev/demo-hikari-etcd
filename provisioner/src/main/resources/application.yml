@@ -34,6 +34,9 @@ provision:
   call-timeout: ${PROV_CALL_TIMEOUT:5s}
   retry-initial-backoff: ${PROV_RETRY_INITIAL:1s}
   retry-max-backoff: ${PROV_RETRY_MAX:30s}
+  # Имя реплики для выборов лидера (пусто = фолбэк на hostname); TTL аренды выборов.
+  name: ${PROV_NAME:}
+  leader-ttl: ${PROV_LEADER_TTL:10s}
 
 logging:
   level:

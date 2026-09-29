@@ -116,4 +116,35 @@ class InstanceKeyTest {
         assertEquals("config/services/a/groups/g/instances/i/", key);
         assertInstanceOf(InstanceKey.Node.class, InstanceKey.parse("config", key));
     }
+
+    @Test
+    void liveServicesCollectOnlyNodeKeys() {
+        var keys = java.util.List.of(
+                "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/",
+                "/config/services/service-a/groups/group-2/instances/service-a-group-2-1/",
+                "/config/services/service-b/groups/group-1/instances/service-b-group-1-1/",
+                "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari"
+                        + "/maximumPoolSize",
+                "/config/services/service-b/groups/g/instances/i/foo/bar",
+                "/config/provisioner/leader/service-a/deadbeef");
+        assertEquals(java.util.Set.of("service-a", "service-b"),
+                InstanceKey.liveServices(ROOT, keys));
+    }
+
+    @Test
+    void liveServicesIgnoreEmptyAndForeignKeys() {
+        assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT, java.util.List.of()));
+        assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT,
+                java.util.List.of("/other/root/services/a/groups/g/instances/i/",
+                        "/config/services/", "/config/services/a/")));
+    }
+
+    @Test
+    void liveServicesDeduplicateByServiceSegment() {
+        var keys = java.util.List.of(
+                "/config/services/a/groups/g1/instances/i1/",
+                "/config/services/a/groups/g2/instances/i2/",
+                "/config/services/a/groups/g2/instances/i2/hikari/connectionTimeoutMs");
+        assertEquals(java.util.Set.of("a"), InstanceKey.liveServices(ROOT, keys));
+    }
 }

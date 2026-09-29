@@ -96,4 +96,21 @@ public final class InstanceKey {
     public static String hikariPrefix(String root, String service, String group, String instance) {
         return nodeKey(root, service, group, instance) + HIKARI + "/";
     }
+
+    /**
+     * Множество живых сервисов по ключам снимка {@code {root}/services/}: сегмент {@code {service}}
+     * каждого узла регистрации. Ключи конфигурации, обрывки путей и любой мусор (включая ключи
+     * выборов лидера — они лежат вне {@code {root}/services/}) сервисами не считаются: сервис
+     * без живых узлов лидера не имеет.
+     */
+    public static java.util.Set<String> liveServices(String root, java.util.List<String> keys) {
+        java.util.Set<String> services = new java.util.LinkedHashSet<>();
+        for (String key : keys) {
+            Parsed parsed = parse(root, key);
+            if (parsed instanceof Node n) {
+                services.add(n.service());
+            }
+        }
+        return services;
+    }
 }

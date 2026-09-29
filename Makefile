@@ -133,6 +133,11 @@ registrations: ## узлы регистрации инстансов в etcd: с
 	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(ETCD_ROOT)/services/" --keys-only \
 		| grep -E '/instances/[^/]+/?$$'
 
+.PHONY: leader
+leader: ## кто ведёт каждый сервис (лидер выборов провизора, наименьший create_revision)
+	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(ETCD_ROOT)/provisioner/leader/" -w json \
+		| python3 scripts/leaders.py
+
 .PHONY: pool
 pool: ## сводка по всем инстансам; make pool I=имя — детально один
 	@$(if $(filter command line,$(origin I)),curl -fsS http://localhost:$(call tuple_port,$(call tuple_by_I,$(I)))/api/pool | python3 -m json.tool,python3 scripts/pool-all.py '$(TUPLES)')

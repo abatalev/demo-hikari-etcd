@@ -4,28 +4,24 @@ import com.example.provisioner.config.ProvisionerProperties;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KeyValue;
-import io.etcd.jetcd.Watch;
 import io.etcd.jetcd.kv.DeleteResponse;
 import io.etcd.jetcd.kv.GetResponse;
 import io.etcd.jetcd.kv.TxnResponse;
 import io.etcd.jetcd.op.Cmp;
 import io.etcd.jetcd.op.CmpTarget;
 import io.etcd.jetcd.op.Op;
-import io.etcd.jetcd.options.DeleteOption;
 import io.etcd.jetcd.options.GetOption;
 import io.etcd.jetcd.options.PutOption;
-import io.etcd.jetcd.options.WatchOption;
-import io.etcd.jetcd.watch.WatchEvent;
-import io.etcd.jetcd.watch.WatchResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,41 +29,67 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 /**
- * Провижинер конфигурации пула: держит инвариант «ключи конфигурации инстанса существуют
- * тогда и только тогда, когда существует его узел регистрации».
+ * Провижинер конфигурации пула с выбором лидера: в стенде два экземпляра, работает один.
  *
- * <p>Появление узла {@code .../instances/{instance}} → в его путь {@code hikari/} добавляются
- * отсутствующие стартовые ключи (атомарный txn «ключа нет → put»; существующие — в том числе
- * ручные правки — никогда не перезаписываются). Исчезновение узла (штатная остановка, краш,
- * истечение TTL) → весь префикс {@code .../instances/{instance}/hikari/} удаляется.
+ * <p>Лидерство выбирается по каждому сервису узлами {@code {root}/provisioner/leader/{service}/}
+ * (вне дерева {@code {root}/services/}): ключ узла — {@code <prefix>/<hex аренды>}, лидер —
+ * ключ с наименьшим create_revision (старейший из живых). Набор сервисов реплика выводит сама из
+ * узлов регистрации дерева {@code {root}/services/} — никакого списка в конфигурации.
  *
- * <p>Схема работы — как у конфиг-источника сервиса: снимок пути (get) + watch с revision+1,
- * чтобы между снимком и подпиской не было окна потерянного обновления. Любой обрыв
- * (compaction, рестарт etcd, потеря сети) приводит к новому снимку и полной сверке.
- * События ключей {@code hikari/*} (свои и чужие) игнорируются — петель нет.
+ * <p>Три собственных потока:
+ * <ul>
+ *   <li>{@code provisioner-lease} — одна аренда на реплику: grant(TTL) + keepalive с интервалом
+ *       TTL/3 (как у регистрации инстансов). Сбой keepalive → аренда отзывается, воркеры
+ *       останавливаются (лидер без аренды не действует), повтор с backoff 1→30с.</li>
+ *   <li>{@code config-provisioner-election} — поллинг дерева сервисов ~1с: для каждого живого
+ *       сервиса реплика обеспечивает свой ключ кампании (txn «ключа нет → put» с арендой — ранг
+ *       не сбрасывается) и определяет лидера по наименьшему {@code create_revision} префикса;
+ *       лидеру — воркер на поддерево сервиса, остальным — stop воркера; ушедшему из дерева
+ *       сервису — resign своего ключа.</li>
+ *   <li>{@code provision-worker-<service>} — сверка + watch поддерева сервиса (см.
+ *       {@link ProvisioningWorker}), по одному на ведомый сервис.</li>
+ * </ul>
+ *
+ * <p>Роли симметричны: рестарт реплики создаёт новый ключ с бо́льшим create_revision, и реплика
+ * стартует фолловером; предпочтительного лидера нет. Записи провижинга идемпотентны
+ * (txn «ключа нет → put»), поэтому краткое окно «двух писателей» при перехвате не ломает
+ * конфигурацию.
  */
 @Component
 public class ConfigProvisioner implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigProvisioner.class);
 
-    private final ProvisionerProperties properties;
+    /** Период поллинга дерева сервисов и кампаний выборов. */
+    private static final long ELECTION_POLL_MS = 1_000L;
 
-    /** Сериализация сверки и обработки watch-событий: две операции не должны пересекаться. */
-    private final Object lock = new Object();
+    private final ProvisionerProperties properties;
 
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicReference<Client> clientRef = new AtomicReference<>();
-    private final Set<String> warnedUnknownKeys = new HashSet<>();
+    /** Аренда выборов этой реплики; -1 пока не получена. */
+    private final AtomicLong leaseId = new AtomicLong(-1);
+
+    /** Имя реплики — значение лидер-ключа; видно через {@code make leader}. */
+    private final String replicaName;
 
     private final String servicesPrefix;
+    private final String leaderRootPrefix;
 
-    private volatile Thread worker;
+    /** Воркеры по сервисам; доступ синхронизирован (стоп воркеров зовёт и lease-поток). */
+    private final Map<String, ProvisioningWorker> workers = new HashMap<>();
+    /** Текущее лидерство по сервисам — только для логов переходов (поток выборов). */
+    private final Map<String, Boolean> leaderState = new HashMap<>();
+
+    private volatile Thread leaseThread;
+    private volatile Thread electionThread;
 
     public ConfigProvisioner(ProvisionerProperties properties) {
         this.properties = properties;
-        this.servicesPrefix =
-                InstanceKey.normalizedRoot(properties.getRoot()) + "/services/";
+        this.replicaName = properties.resolveName();
+        String root = InstanceKey.normalizedRoot(properties.getRoot());
+        this.servicesPrefix = root + "/services/";
+        this.leaderRootPrefix = root + "/provisioner/leader/";
     }
 
     /** Стартуем последними и останавливаем первыми: сеть etcd не должна мешать shutdown Spring. */
@@ -86,11 +108,16 @@ public class ConfigProvisioner implements SmartLifecycle {
         if (!running.compareAndSet(false, true)) {
             return;
         }
-        worker = Thread.ofPlatform()
+        leaseThread = Thread.ofPlatform()
                 .daemon(true)
-                .name("config-provisioner-watch")
-                .unstarted(this::runLoop);
-        worker.start();
+                .name("provisioner-lease")
+                .unstarted(this::leaseLoop);
+        leaseThread.start();
+        electionThread = Thread.ofPlatform()
+                .daemon(true)
+                .name("config-provisioner-election")
+                .unstarted(this::electionLoop);
+        electionThread.start();
     }
 
     @Override
@@ -98,10 +125,18 @@ public class ConfigProvisioner implements SmartLifecycle {
         if (!running.compareAndSet(true, false)) {
             return;
         }
-        Thread w = worker;
-        if (w != null) {
-            w.interrupt();
+        Thread lt = leaseThread;
+        if (lt != null) {
+            lt.interrupt();
         }
+        Thread et = electionThread;
+        if (et != null) {
+            et.interrupt();
+        }
+        stopAllWorkers();
+        // Штатная остановка: аренда отзывается до закрытия клиента (ключи выборов исчезают сразу,
+        // фолловер перехватывает без ожидания TTL).
+        revokeLease();
         Client c = clientRef.getAndSet(null);
         if (c != null) {
             try {
@@ -113,27 +148,51 @@ public class ConfigProvisioner implements SmartLifecycle {
     }
 
     /**
-     * Цикл: сверка (снимок) → watch с revision+1. Ошибка или закрытый watch возвращают цикл
-     * к новой сверке с экспоненциальным backoff'ом.
+     * Аренда выборов: grant(TTL) + keepalive с интервалом TTL/3. Сбой keepalive или grant →
+     * лидерство слагается немедленно (воркеры остановлены, аренда отозвана), повтор с backoff'ом.
      */
-    private void runLoop() {
+    private void leaseLoop() {
         long backoffMs = properties.getRetryInitialBackoff().toMillis();
         while (running.get()) {
             try {
                 Client c = client();
-                long revision = reconcile(c);
-                if (!running.get()) {
-                    return;
+                long ttlSeconds = Math.max(1, properties.getLeaderTtl().getSeconds());
+                long lease = c.getLeaseClient().grant(ttlSeconds)
+                        .get(callTimeoutMs(), TimeUnit.MILLISECONDS).getID();
+                leaseId.set(lease);
+                log.info("реплика {}: аренда выборов получена lease={}, ttl={}с",
+                        replicaName, lease, ttlSeconds);
+                long keepaliveMs = ElectionTimings.keepaliveIntervalMillis(
+                        properties.getLeaderTtl());
+                while (running.get()) {
+                    try {
+                        c.getLeaseClient().keepAliveOnce(lease)
+                                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (Exception e) {
+                        log.warn("реплика {}: keepalive аренды оборвался ({}), слагаю лидерство",
+                                replicaName, e.toString());
+                        onLeaseLost(lease);
+                        if (!sleep(backoffMs)) {
+                            return;
+                        }
+                        break;
+                    }
+                    if (!sleep(keepaliveMs)) {
+                        return;
+                    }
                 }
-                watch(c, revision + 1);
-                // watch завершился (compaction/reconnect) -> пересверяемся
                 backoffMs = properties.getRetryInitialBackoff().toMillis();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
-                log.warn("etcd недоступен/ошибка watch ({}), повтор через {} мс",
-                        e.toString(), backoffMs);
+                log.warn("реплика {}: аренда выборов не получена ({}), повтор через {} мс",
+                        replicaName, e.toString(), backoffMs);
+                leaseId.set(-1);
+                stopAllWorkers();
                 if (!sleep(backoffMs)) {
                     return;
                 }
@@ -142,7 +201,204 @@ public class ConfigProvisioner implements SmartLifecycle {
         }
     }
 
-    private boolean sleep(long ms) {
+    /** Потеря аренды (keepalive-сторож): воркеры остановлены, ключи узлов умрут по TTL. */
+    private void onLeaseLost(long lease) {
+        leaseId.compareAndSet(lease, -1);
+        stopAllWorkers();
+        try {
+            client().getLeaseClient().revoke(lease).get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.debug("аренда {} уже неактивна: {}", lease, e.toString());
+        }
+    }
+
+    /**
+     * Цикл выборов: снимок дерева {@code {root}/services/} → живой набор сервисов; каждому сервису
+     * — кампания (лидер — старейший живой ключ), лидеру — воркер, остальным — stop воркера;
+     * ушедшему из дерева сервису — resign своей кампании.
+     */
+    private void electionLoop() {
+        long backoffMs = properties.getRetryInitialBackoff().toMillis();
+        Set<String> known = new HashSet<>();
+        while (running.get()) {
+            try {
+                Client c = client();
+                long lease = leaseId.get();
+                if (lease < 0) {
+                    // Аренда ещё не получена lease-потоком — ждём следующего поллинга.
+                    if (!sleep(ELECTION_POLL_MS)) {
+                        return;
+                    }
+                    continue;
+                }
+                Set<String> services = scanServices(c);
+
+                // Сервисы, полностью исчезнувшие из дерева: выбор лидера за них завершается.
+                for (String gone : known) {
+                    if (!services.contains(gone)) {
+                        log.info("сервис {} исчез из дерева регистрации: завершаю выборы",
+                                gone);
+                        resignKey(c, gone, lease);
+                        stopWorker(gone);
+                    }
+                }
+                known = services;
+
+                for (String service : services) {
+                    if (electFor(c, service, lease)) {
+                        startWorker(service);
+                    } else {
+                        stopWorker(service);
+                    }
+                }
+                backoffMs = properties.getRetryInitialBackoff().toMillis();
+                if (!sleep(ELECTION_POLL_MS)) {
+                    return;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                // Не можем подтвердить лидерство — fail-closed: воркеры остановлены,
+                // перевыборы после backoff'а (записи идемпотентны, потерь нет).
+                log.warn("реплика {}: цикл выборов, ошибка ({}), повтор через {} мс",
+                        replicaName, e.toString(), backoffMs);
+                stopAllWorkers();
+                if (!sleep(backoffMs)) {
+                    return;
+                }
+                backoffMs = Math.min(backoffMs * 2, properties.getRetryMaxBackoff().toMillis());
+            }
+        }
+    }
+
+    /** Живой набор сервисов: сегмент {@code {service}} узлов регистрации (не ключей конфигурации). */
+    private Set<String> scanServices(Client c) throws Exception {
+        GetResponse resp = c.getKVClient()
+                .get(bs(servicesPrefix), GetOption.newBuilder().isPrefix(true).build())
+                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+        List<String> keys = new ArrayList<>(resp.getKvs().size());
+        for (KeyValue kv : resp.getKvs()) {
+            keys.add(kv.getKey().toString(StandardCharsets.UTF_8));
+        }
+        return InstanceKey.liveServices(properties.getRoot(), keys);
+    }
+
+    /**
+     * Выборы за сервис: обеспечение своего ключа кампании и определение лидера по наименьшему
+     * {@code create_revision} префикса {@code {root}/provisioner/leader/{service}/}. Никакого
+     * блокирующего ожидания: вызов возвращается всегда, лидер решается сравнением аренд.
+     */
+    private boolean electFor(Client c, String service, long lease) throws Exception {
+        ensureCandidate(c, service, lease);
+        String prefix = leaderRootPrefix + service + "/";
+        GetResponse resp = c.getKVClient()
+                .get(bs(prefix), GetOption.newBuilder()
+                        .withPrefix(bs(prefix))
+                        .withSortField(GetOption.SortTarget.CREATE)
+                        .withSortOrder(GetOption.SortOrder.ASCEND)
+                        .withLimit(1)
+                        .build())
+                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+        List<KeyValue> kvs = resp.getKvs();
+        boolean mine = !kvs.isEmpty() && kvs.get(0).getLease() == lease;
+        Boolean prev = leaderState.get(service);
+        if (mine && !Boolean.TRUE.equals(prev)) {
+            log.info("реплика {} выиграла выборы сервиса {} (ключ {})", replicaName, service,
+                    candidateKey(service, lease));
+        } else if (!mine && Boolean.TRUE.equals(prev)) {
+            log.info("реплика {} потеряла лидерство сервиса {} (ведёт lease {})", replicaName,
+                    service, kvs.isEmpty() ? "нет" : kvs.get(0).getLease());
+        }
+        leaderState.put(service, mine);
+        return mine;
+    }
+
+    /**
+     * Свой ключ кампании: атомарный txn «ключа нет → put» с привязкой к аренде. Повторная кампания
+     * существующий ключ не трогает — ранг (create_revision) не сбрасывается переполлингами.
+     */
+    private void ensureCandidate(Client c, String service, long lease) throws Exception {
+        String key = candidateKey(service, lease);
+        TxnResponse resp = c.getKVClient().txn()
+                .If(new Cmp(bs(key), Cmp.Op.EQUAL, CmpTarget.createRevision(0)))
+                .Then(Op.put(bs(key), bs(replicaName),
+                        PutOption.newBuilder().withLeaseId(lease).build()))
+                .commit()
+                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+        if (resp.isSucceeded()) {
+            log.info("реплика {} вступает в выборы сервиса {} (ключ {})", replicaName, service, key);
+        }
+    }
+
+    /** Резинь за исчезнувший сервис: свой ключ кампании удаляется, аренда остаётся жить. */
+    private void resignKey(Client c, String service, long lease) throws Exception {
+        String key = candidateKey(service, lease);
+        DeleteResponse del = c.getKVClient().delete(bs(key))
+                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+        if (del.getDeleted() > 0) {
+            log.info("выборы по сервису {} завершены: ключ {} удалён", service, key);
+        }
+    }
+
+    /** Ключ кампании: {@code {root}/provisioner/leader/{service}/{hex аренды реплики}}. */
+    private String candidateKey(String service, long lease) {
+        return leaderRootPrefix + service + "/" + Long.toHexString(lease);
+    }
+
+    private void startWorker(String service) {
+        synchronized (workers) {
+            ProvisioningWorker w = workers.get(service);
+            if (w == null || !w.isActive()) {
+                w = new ProvisioningWorker(this, service);
+                workers.put(service, w);
+                w.start();
+            }
+        }
+    }
+
+    private void stopWorker(String service) {
+        synchronized (workers) {
+            ProvisioningWorker w = workers.remove(service);
+            if (w != null) {
+                w.stop();
+            }
+        }
+    }
+
+    private void stopAllWorkers() {
+        synchronized (workers) {
+            for (ProvisioningWorker w : workers.values()) {
+                w.stop();
+            }
+            workers.clear();
+        }
+    }
+
+    /** Отзыв аренды выборов (штатная остановка). Ключи узлов реплики исчезают сразу. */
+    private void revokeLease() {
+        long lease = leaseId.get();
+        if (lease < 0) {
+            return;
+        }
+        Client c = clientRef.get();
+        if (c != null) {
+            try {
+                c.getLeaseClient().revoke(lease).get(callTimeoutMs(), TimeUnit.MILLISECONDS);
+                log.info("реплика {}: аренда выборов отозвана lease={}", replicaName, lease);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.warn("реплика {}: не удалось отозвать аренду ({}), ключи истекут по TTL",
+                        replicaName, e.toString());
+            }
+        }
+        leaseId.compareAndSet(lease, -1);
+    }
+
+    boolean sleep(long ms) {
         try {
             Thread.sleep(ms);
             return running.get();
@@ -152,7 +408,7 @@ public class ConfigProvisioner implements SmartLifecycle {
         }
     }
 
-    private Client client() {
+    Client client() {
         Client existing = clientRef.get();
         if (existing != null) {
             return existing;
@@ -163,184 +419,22 @@ public class ConfigProvisioner implements SmartLifecycle {
                         .endpoints(properties.getEndpoints().toArray(String[]::new))
                         .build();
                 clientRef.set(c);
-                log.info("провижинер стартует: endpoints={} services={}", properties.getEndpoints(),
-                        servicesPrefix);
+                log.info("провижинер {} стартует: endpoints={} services={}", replicaName,
+                        properties.getEndpoints(), servicesPrefix);
             }
             return clientRef.get();
         }
     }
 
-    /**
-     * Полная сверка: снимок дерева {@code {root}/services/}, обеспечение стартовых ключей всем
-     * живым узлам и очистка осиротевших префиксов конфигурации. Возвращает revision снимка —
-     * подписка стартует с revision+1 (никакого окна между снимком и watch).
-     */
-    private long reconcile(Client c) throws Exception {
-        GetResponse resp = c.getKVClient()
-                .get(bs(servicesPrefix), GetOption.newBuilder().isPrefix(true).build())
-                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
-
-        Map<String, InstanceKey.Node> nodes = new HashMap<>();
-        Set<String> configPrefixes = new HashSet<>();
-        for (KeyValue kv : resp.getKvs()) {
-            String key = kv.getKey().toString(StandardCharsets.UTF_8);
-            InstanceKey.Parsed parsed = InstanceKey.parse(properties.getRoot(), key);
-            if (parsed instanceof InstanceKey.Node n) {
-                nodes.put(key, n);
-            } else if (parsed instanceof InstanceKey.Config cfg) {
-                configPrefixes.add(InstanceKey.hikariPrefix(properties.getRoot(),
-                        cfg.service(), cfg.group(), cfg.instance()));
-            } else {
-                warnUnknownKey(key);
-            }
-        }
-
-        synchronized (lock) {
-            Set<String> livePrefixes = new HashSet<>();
-            for (InstanceKey.Node node : nodes.values()) {
-                livePrefixes.add(InstanceKey.hikariPrefix(properties.getRoot(),
-                        node.service(), node.group(), node.instance()));
-                provision(c, node);
-            }
-            int orphans = 0;
-            for (String orphan : configPrefixes) {
-                if (!livePrefixes.contains(orphan)) {
-                    wipe(c, orphan);
-                    orphans++;
-                }
-            }
-            log.info("сверка завершена: живых узлов {}, осиротевших префиксов {}",
-                    nodes.size(), orphans);
-        }
-        return resp.getHeader().getRevision();
+    ProvisionerProperties properties() {
+        return properties;
     }
 
-    /** Обеспечение стартовых ключей живого инстанса (каждый — атомарно, «ключа нет → put»). */
-    private void provision(Client c, InstanceKey.Node node) throws Exception {
-        String prefix = InstanceKey.hikariPrefix(properties.getRoot(),
-                node.service(), node.group(), node.instance());
-        ensureKey(c, prefix, "maximumPoolSize", String.valueOf(properties.getMaximumPoolSize()));
-        ensureKey(c, prefix, "connectionTimeoutMs",
-                String.valueOf(properties.getConnectionTimeoutMs()));
-    }
-
-    private void ensureKey(Client c, String hikariPrefix, String name, String value)
-            throws Exception {
-        ByteSequence key = bs(hikariPrefix + name);
-        TxnResponse resp = c.getKVClient().txn()
-                .If(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.createRevision(0)))
-                .Then(Op.put(key, bs(value), PutOption.DEFAULT))
-                .commit()
-                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
-        if (resp.isSucceeded()) {
-            log.info("провижининг: положен ключ {}={}", key.toString(StandardCharsets.UTF_8), value);
-        } else {
-            log.debug("провижининг: ключ {} уже существует, не трогаю",
-                    key.toString(StandardCharsets.UTF_8));
-        }
-    }
-
-    /** Удаление всего префикса конфигурации инстанса (включая ключи, добавленные вручную). */
-    private void wipe(Client c, String hikariPrefix) throws Exception {
-        DeleteResponse del = c.getKVClient()
-                .delete(bs(hikariPrefix), DeleteOption.newBuilder().isPrefix(true).build())
-                .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
-        long deleted = del.getDeleted();
-        if (deleted > 0) {
-            log.info("очистка: удалено {} ключей префикса {}", deleted, hikariPrefix);
-        }
-    }
-
-    /** Долгоживущий watch: возвращается только на ошибке или закрытии стрима. */
-    private void watch(Client c, long fromRevision) throws Exception {
-        CountDownLatch finished = new CountDownLatch(1);
-        ByteSequence prefix = bs(servicesPrefix);
-        try (Watch.Watcher watcher = c.getWatchClient().watch(prefix,
-                WatchOption.newBuilder()
-                        .withPrefix(prefix)
-                        .withRevision(fromRevision)
-                        .build(),
-                new Watch.Listener() {
-                    @Override
-                    public void onNext(WatchResponse response) {
-                        onEvent(response);
-                    }
-
-                    @Override
-                    public void onError(Throwable t) {
-                        log.warn("ошибка watch ({}), переподключаемся", t.toString());
-                        finished.countDown();
-                    }
-
-                    @Override
-                    public void onCompleted() {
-                        log.info("etcd закрыл watch (revision ~{}), переподключаемся", fromRevision);
-                        finished.countDown();
-                    }
-                })) {
-            finished.await();
-        }
-    }
-
-    private void onEvent(WatchResponse response) {
-        List<WatchEvent> events = response.getEvents();
-        if (events.isEmpty()) {
-            return;
-        }
-        synchronized (lock) {
-            for (WatchEvent event : events) {
-                handleEvent(event);
-            }
-        }
-    }
-
-    /** Одно событие: узел → провижин/очистка; ключ конфигурации → игнор; мусор → warn один раз. */
-    private void handleEvent(WatchEvent event) {
-        if (!running.get()) {
-            // Остановка началась: не создаём новый клиент и не пишем в etcd на последних метрах.
-            return;
-        }
-        String key = event.getKeyValue().getKey().toString(StandardCharsets.UTF_8);
-        InstanceKey.Parsed parsed = InstanceKey.parse(properties.getRoot(), key);
-        try {
-            if (parsed instanceof InstanceKey.Node n) {
-                Client c = client();
-                if (event.getEventType() == WatchEvent.EventType.PUT) {
-                    log.info("узел {} появился: обеспечиваю конфигурацию", key);
-                    provision(c, n);
-                } else {
-                    String prefix = InstanceKey.hikariPrefix(properties.getRoot(),
-                            n.service(), n.group(), n.instance());
-                    log.info("узел {} исчез: удаляю конфигурацию", key);
-                    wipe(c, prefix);
-                }
-            } else if (parsed instanceof InstanceKey.Config) {
-                // События конфигурации (свои записи и ручные правки) игнорируются — петель нет.
-                log.debug("событие ключа конфигурации {} игнорируется", key);
-            } else {
-                warnUnknownKey(key);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            log.warn("не удалось обработать событие {} ключа {}: {} — догонит сверка",
-                    event.getEventType(), key, e.toString());
-        }
-    }
-
-    private void warnUnknownKey(String key) {
-        synchronized (warnedUnknownKeys) {
-            if (warnedUnknownKeys.add(key)) {
-                log.warn("неизвестный ключ в дереве инстансов (опечатка?): {}", key);
-            }
-        }
-    }
-
-    private long callTimeoutMs() {
+    long callTimeoutMs() {
         return properties.getCallTimeout().toMillis();
     }
 
-    private static ByteSequence bs(String s) {
+    static ByteSequence bs(String s) {
         return ByteSequence.from(s, StandardCharsets.UTF_8);
     }
 }

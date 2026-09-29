@@ -38,6 +38,31 @@ x-service: &service
     start_period: 90s
     retries: 60
 
+# Общий блок провизинера конфигурации (две реплики). Работает один на сервис: лидер выбирается
+# узлами {root}/provisioner/leader/{service}/, набор сервисов провизор выводит сам из узлов
+# регистрации дерева {root}/services/. Ключи кладутся атомарно и только если их ещё нет (txn
+# «ключа нет → put»): ручные правки оператора не затираются ни одной из реплик.
+x-provisioner: &provisioner
+  image: hikari-etcd/config-provisioner:local
+  build: ./provisioner
+  mem_limit: 512m
+  depends_on:
+    etcd:
+      condition: service_healthy
+  environment: &provisioner-env
+    PROV_ETCD_ENDPOINTS: http://etcd:2379
+    PROV_ETCD_ROOT: ${ETCD_ROOT:-/config}
+    PROV_MAX_POOL_SIZE: ${PROV_MAX_POOL_SIZE:-10}
+    PROV_CONNECTION_TIMEOUT_MS: ${PROV_CONNECTION_TIMEOUT_MS:-3000}
+    PROV_LEADER_TTL: ${PROV_LEADER_TTL:-10s}
+  healthcheck:
+    # Живость — только ping: провижининг переживает обрывы etcd сам.
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
+    interval: 5s
+    timeout: 3s
+    start_period: 60s
+    retries: 60
+
 services:
   postgres:
     image: postgres:16
@@ -87,28 +112,20 @@ services:
       timeout: 3s
       retries: 20
 
-  # Провижинер конфигурации: появление узла регистрации инстанса -> в путь кладутся
-  # отсутствующие стартовые ключи hikari/*, исчезновение узла -> весь префикс удаляется.
-  # Стартовые ключи кладутся атомарно и только если их ещё нет (ручные правки не затираются).
-  config-provisioner:
-    image: hikari-etcd/config-provisioner:local
-    build: ./provisioner
-    mem_limit: 512m
-    depends_on:
-      etcd:
-        condition: service_healthy
+  # Провижинер конфигурации, две реплики. Работает один на сервис (выборы лидера по
+  # {root}/provisioner/leader/{service}/): появление узла регистрации инстанса -> в его путь
+  # кладутся отсутствующие стартовые ключи hikari/*, исчезновение узла -> весь префикс удаляется.
+  config-provisioner-1:
+    <<: *provisioner
     environment:
-      PROV_ETCD_ENDPOINTS: http://etcd:2379
-      PROV_ETCD_ROOT: ${ETCD_ROOT:-/config}
-      PROV_MAX_POOL_SIZE: ${PROV_MAX_POOL_SIZE:-10}
-      PROV_CONNECTION_TIMEOUT_MS: ${PROV_CONNECTION_TIMEOUT_MS:-3000}
-    healthcheck:
-      # Живость — только ping: провижининг переживает обрывы etcd сам.
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
-      interval: 5s
-      timeout: 3s
-      start_period: 60s
-      retries: 60
+      <<: *provisioner-env
+      PROV_NAME: provisioner-1
+
+  config-provisioner-2:
+    <<: *provisioner
+    environment:
+      <<: *provisioner-env
+      PROV_NAME: provisioner-2
 
   # --- инстансы service-a (группы group-1, group-2) ---
   service-a-group-1-1:
