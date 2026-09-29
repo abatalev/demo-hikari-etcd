@@ -22,8 +22,25 @@ public class ProvisionerProperties {
     /** Корень ключей (дефолт «/config»); сегменты пути такие же, как у сервиса. */
     private String root = "/config";
 
-    /** Стартовое значение maximumPoolSize для вновь зарегистрированных инстансов. */
-    private int maximumPoolSize = 10;
+    /**
+     * Бюджет соединений сервиса по умолчанию (ключ {@code {root}/services/{service}/maxConnections},
+     * создаётся put-if-absent при появлении первого узла сервиса). Провижер делит его равномерно
+     * между живыми инстансами, сумма долей равна бюджету.
+     */
+    private int maxConnections = 100;
+
+    /**
+     * Минимальная доля инстанса по умолчанию (ключ {@code .../minConnections}). Инстанс
+     * обслуживает трафик, только если его доля не меньше этого значения; если бюджета не хватает,
+     * часть инстансов остаётся без конфигурации.
+     */
+    private int minConnections = 1;
+
+    /**
+     * Верхняя граница доли инстанса. Намеренно зеркалит {@code HikariSettings.POOL_SIZE_MAX} у
+     * сервиса: доля выше границы усекается, иначе сервис отклонил бы конфиг целиком.
+     */
+    private int maxShare = 200;
 
     /** Стартовое значение connectionTimeoutMs для вновь зарегистрированных инстансов. */
     private int connectionTimeoutMs = 3000;
@@ -57,12 +74,28 @@ public class ProvisionerProperties {
         this.root = root;
     }
 
-    public int getMaximumPoolSize() {
-        return maximumPoolSize;
+    public int getMaxConnections() {
+        return maxConnections;
     }
 
-    public void setMaximumPoolSize(int maximumPoolSize) {
-        this.maximumPoolSize = maximumPoolSize;
+    public void setMaxConnections(int maxConnections) {
+        this.maxConnections = maxConnections;
+    }
+
+    public int getMinConnections() {
+        return minConnections;
+    }
+
+    public void setMinConnections(int minConnections) {
+        this.minConnections = minConnections;
+    }
+
+    public int getMaxShare() {
+        return maxShare;
+    }
+
+    public void setMaxShare(int maxShare) {
+        this.maxShare = maxShare;
     }
 
     public int getConnectionTimeoutMs() {

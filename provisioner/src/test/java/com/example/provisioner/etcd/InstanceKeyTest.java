@@ -147,4 +147,43 @@ class InstanceKeyTest {
                 "/config/services/a/groups/g2/instances/i2/hikari/connectionTimeoutMs");
         assertEquals(java.util.Set.of("a"), InstanceKey.liveServices(ROOT, keys));
     }
+
+    @Test
+    void parsesServiceBudgetKeys() {
+        var max = InstanceKey.parse(ROOT, "/config/services/service-a/maxConnections");
+        assertInstanceOf(InstanceKey.ServiceSetting.class, max);
+        assertEquals(new InstanceKey.ServiceSetting("service-a", "maxConnections"), max);
+
+        var min = InstanceKey.parse(ROOT, "/config/services/service-a/minConnections");
+        assertInstanceOf(InstanceKey.ServiceSetting.class, min);
+        assertEquals(new InstanceKey.ServiceSetting("service-a", "minConnections"), min);
+    }
+
+    @Test
+    void rejectsUnknownServiceLevelKey() {
+        // Сервисный уровень: распознаются только два ключа бюджета, остальное — опечатка.
+        assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT, "/config/services/a/foo"));
+        assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT, "/config/services/a"));
+        assertInstanceOf(InstanceKey.Other.class,
+                InstanceKey.parse(ROOT, "/config/services/a/maxConnections/extra"));
+        assertInstanceOf(InstanceKey.Other.class,
+                InstanceKey.parse(ROOT, "/config/services//maxConnections"));
+    }
+
+    @Test
+    void serviceSettingKeyRoundTrip() {
+        String key = InstanceKey.serviceSettingKey(ROOT, "service-a", InstanceKey.MAX_CONNECTIONS);
+        assertEquals("/config/services/service-a/maxConnections", key);
+        assertInstanceOf(InstanceKey.ServiceSetting.class, InstanceKey.parse(ROOT, key));
+    }
+
+    @Test
+    void liveServicesIgnoresServiceBudgetKeys() {
+        // Ключи бюджета не создают сервис и не увеличивают число живых инстансов.
+        var keys = java.util.List.of(
+                "/config/services/service-a/maxConnections",
+                "/config/services/service-a/minConnections",
+                "/config/services/service-b/maxConnections");
+        assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT, keys));
+    }
 }

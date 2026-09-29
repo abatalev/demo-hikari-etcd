@@ -51,8 +51,11 @@ import com.example.poolsvc.pool.ManagedPool;
  *
  * <p>Гейт трафика: пока конфигурация не получена (в пути нет ни одного распознанного ключа),
  * сервис остаётся запущенным, но не готов принимать трафик — готовность (readiness) закрыта,
- * живость (liveness) от etcd не зависит. После первого распознанного ключа гейт открывается
- * навсегда: дальнейшая недоступность etcd не останавливает обслуживание.
+ * живость (liveness) от etcd не зависит. Гейт открывается первым распознанным ключом и
+ * закрывается, когда распознанных ключей не остаётся (провижер снял конфигурацию — инстанс,
+ * например, потерял долю бюджета), после чего снова открывается при возврате ключей. Закрытие
+ * происходит только по реальным событиям удаления при живом etcd: недоступность хранилища ни
+ * трафик, ни готовность не останавливает — в этом случае события не приходят вовсе.
  *
  * <p>Регистрация инстанса: при включённом источнике на старте в etcd создаётся узел
  * {@code {root}/.../instances/{instance}} (имя ключа = имя инстанса), удерживаемый арендой
@@ -81,7 +84,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private final Set<String> warnedUnknownKeys = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicBoolean connected = new AtomicBoolean();
-    /** Гейт трафика: открывается после получения конфигурации и никогда не закрывается. */
+    /** Гейт трафика: открывается после получения конфигурации и закрывается при её снятии. */
     private final AtomicBoolean trafficAllowed = new AtomicBoolean();
     private final AtomicLong lastRevision = new AtomicLong();
     private final AtomicLong lastEventAt = new AtomicLong();
@@ -340,7 +343,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
         lastError.set(null);
         if (fresh.isEmpty() && emptyPrefixLogged.compareAndSet(false, true)) {
             log.warn("в пути конфигурации {} нет ни одного ключа — конфигурация не получена, "
-                    + "трафик закрыт до первого ключа", path);
+                    + "трафик закрыт", path);
         }
         warnAboutUnknownKeys();
         apply("etcd-снапшот@" + revision);
@@ -426,27 +429,34 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     }
 
     /**
-     * Гейт трафика: открывается один раз, когда в наборе ключей появляется распознанный ключ.
-     * Полученная, но отклонённая конфигурация гейт не удерживает — значение получено, трафик
-     * открываем, а пул остаётся на последних рабочих значениях.
+     * Гейт трафика: открывается, когда в наборе ключей появляется распознанный ключ; закрывается,
+     * когда распознанных ключей не остаётся (провижер снял конфигурацию — инстанс, например,
+     * потерял долю бюджета) и снова открывается при возврате ключей. Закрытие происходит только по
+     * реальным событиям удаления/снимку при живом etcd: недоступное хранилище событий не шлёт и
+     * гейт не трогает. Полученная, но отклонённая конфигурация гейт не удерживает — значение
+     * получено, трафик открываем, а пул остаётся на последних рабочих значениях.
      */
     private void updateReadiness(String reason) {
         if (!properties.isEnabled()) {
             return;
         }
-        if (trafficAllowed.get()) {
+        boolean hasRecognized = keys.keySet().stream()
+                .anyMatch(key -> EtcdKeys.ALL.contains(EtcdKeys.shortKey(key, path)));
+        if (hasRecognized) {
+            if (trafficAllowed.compareAndSet(false, true)) {
+                log.info("[{}] конфигурация по пути {} получена, открываем трафик", reason, path);
+                eventPublisher.publishEvent(new AvailabilityChangeEvent<>(this, ReadinessState.ACCEPTING_TRAFFIC));
+            }
             notReadyReason.set(null);
             return;
         }
-        boolean hasRecognized = keys.keySet().stream()
-                .anyMatch(key -> EtcdKeys.ALL.contains(EtcdKeys.shortKey(key, path)));
-        if (hasRecognized && trafficAllowed.compareAndSet(false, true)) {
-            notReadyReason.set(null);
-            log.info("[{}] конфигурация по пути {} получена, открываем трафик", reason, path);
-            eventPublisher.publishEvent(new AvailabilityChangeEvent<>(this, ReadinessState.ACCEPTING_TRAFFIC));
-        } else {
-            refreshNotReadyReason();
+        // Распознанных ключей нет: конфигурация снята или ещё не приходила. Закрываем трафик,
+        // если был открыт, и держим причину на виду.
+        if (trafficAllowed.compareAndSet(true, false)) {
+            log.warn("[{}] в пути {} не осталось распознанных ключей — закрываю трафик", reason, path);
+            eventPublisher.publishEvent(new AvailabilityChangeEvent<>(this, ReadinessState.REFUSING_TRAFFIC));
         }
+        refreshNotReadyReason();
     }
 
     private void refreshNotReadyReason() {

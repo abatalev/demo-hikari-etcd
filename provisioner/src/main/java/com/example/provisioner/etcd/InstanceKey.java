@@ -6,16 +6,27 @@ package com.example.provisioner.etcd;
  * <p>Грамматика (аналогична {@code EtcdKeyPath} у сервиса):
  * {@code {root}/services/{service}/groups/{group}/instances/{instance}/} — узел регистрации
  * инстанса; внутри него {@code .../instances/{instance}/hikari/{key}} — ключи конфигурации.
- * Узел хранится с пустым значением и хвостовым слешом, поэтому разбор принимает ключ узла как
- * с хвостовым слешом, так и без него.
+ * Узел хранится с пустым значением и хвостовым слешем, поэтому разбор принимает ключ узла как
+ * с хвостовым слешем, так и без него.
+ *
+ * <p>На уровне сервиса живут ещё два ключа бюджета соединений —
+ * {@code {root}/services/{service}/maxConnections} и {@code .../minConnections}. Это не узлы
+ * регистрации: они не создают сервис и не увеличивают число живых инстансов, но по событию
+ * изменения запускают пересчёт распределения бюджета.
  *
  * <p>Ключи {@code hikari/} провизор обязан игнорировать (их пишет он сам и оператор);
- * всё, что не узел и не ключ конфигурации, — мусор/опечатка, его тоже не трогаем.
+ * всё, что не узел, не ключ конфигурации и не сервисная настройка, — мусор/опечатка, его тоже
+ * не трогаем.
  */
 public final class InstanceKey {
 
+    /** Распознанные сервисные настройки бюджета соединений. */
+    public static final String MAX_CONNECTIONS = "maxConnections";
+
+    public static final String MIN_CONNECTIONS = "minConnections";
+
     /** Результат разбора полного ключа. */
-    public sealed interface Parsed permits Node, Config, Other {
+    public sealed interface Parsed permits Node, Config, ServiceSetting, Other {
     }
 
     /** Ключ — сам узел регистрации {@code .../instances/{instance}/}. */
@@ -24,6 +35,13 @@ public final class InstanceKey {
 
     /** Ключ — ключ конфигурации внутри {@code .../instances/{instance}/hikari/}. */
     public record Config(String service, String group, String instance) implements Parsed {
+    }
+
+    /**
+     * Ключ — сервисная настройка бюджета соединений {@code {root}/services/{service}/{setting}},
+     * где setting — {@link #MAX_CONNECTIONS} или {@link #MIN_CONNECTIONS}.
+     */
+    public record ServiceSetting(String service, String setting) implements Parsed {
     }
 
     /** Ключ не относится к дереву инстансов (чужой корень, битые сегменты, не-hikari ключ). */
@@ -51,7 +69,7 @@ public final class InstanceKey {
      * Разбирает полный ключ относительно заданного корня.
      *
      * @param fullKey полный ключ, как его отдаёт etcd
-     * @return {@link Node}, {@link Config} или {@link Other}
+     * @return {@link Node}, {@link Config}, {@link ServiceSetting} или {@link Other}
      */
     public static Parsed parse(String root, String fullKey) {
         String prefix = normalizedRoot(root) + "/" + SERVICES + "/";
@@ -63,6 +81,9 @@ public final class InstanceKey {
             rest = rest.substring(0, rest.length() - 1);
         }
         String[] parts = rest.split("/");
+        if (parts.length == 2 && !parts[0].isEmpty()) {
+            return parseServiceSetting(parts[0], parts[1]);
+        }
         if (parts.length < 5) {
             return new Other();
         }
@@ -86,7 +107,20 @@ public final class InstanceKey {
         return new Other();
     }
 
-    /** Полный ключ узла регистрации инстанса (с хвостовым слешом). */
+    /** Распознанная сервисная настройка бюджета или {@link Other} (мусор/опечатка). */
+    private static Parsed parseServiceSetting(String service, String setting) {
+        if (MAX_CONNECTIONS.equals(setting) || MIN_CONNECTIONS.equals(setting)) {
+            return new ServiceSetting(service, setting);
+        }
+        return new Other();
+    }
+
+    /** Полный ключ сервисной настройки бюджета {@code {root}/services/{service}/{setting}}. */
+    public static String serviceSettingKey(String root, String service, String setting) {
+        return normalizedRoot(root) + "/" + SERVICES + "/" + service + "/" + setting;
+    }
+
+    /** Полный ключ узла регистрации инстанса (с хвостовым слешем). */
     public static String nodeKey(String root, String service, String group, String instance) {
         return normalizedRoot(root) + "/" + SERVICES + "/" + service + "/" + GROUPS + "/" + group
                 + "/" + INSTANCES + "/" + instance + "/";
@@ -99,9 +133,9 @@ public final class InstanceKey {
 
     /**
      * Множество живых сервисов по ключам снимка {@code {root}/services/}: сегмент {@code {service}}
-     * каждого узла регистрации. Ключи конфигурации, обрывки путей и любой мусор (включая ключи
-     * выборов лидера — они лежат вне {@code {root}/services/}) сервисами не считаются: сервис
-     * без живых узлов лидера не имеет.
+     * каждого узла регистрации. Ключи конфигурации, сервисные настройки бюджета, обрывки путей и
+     * любой мусор (включая ключи выборов лидера — они лежат вне {@code {root}/services/})
+     * сервисами не считаются: сервис без живых узлов лидера не имеет.
      */
     public static java.util.Set<String> liveServices(String root, java.util.List<String> keys) {
         java.util.Set<String> services = new java.util.LinkedHashSet<>();

@@ -39,6 +39,25 @@ tuple_by_I = $(foreach t,$(TUPLES),$(if $(filter $(I),$(call tuple_instance,$(t)
 # кортежи по сервису (S=...) / группе (G=...)
 tuples_by_S = $(foreach t,$(TUPLES),$(if $(filter $(S),$(call tuple_service,$(t))),$(t)))
 tuples_by_G = $(foreach t,$(TUPLES),$(if $(filter $(G),$(call tuple_group,$(t))),$(t)))
+# кортежи по сервису, заданному аргументом (для циклов по переменной-аргументу)
+tuples_by_serv = $(foreach t,$(TUPLES),$(if $(filter $(1),$(call tuple_service,$(t))),$(t)))
+
+# Имена сервисов: из S=... либо все сервисы .env по порядку первого появления. Кортежи в shell
+# кавычим: иначе `|` внутри кортежа разрежется в пайп и for развалится.
+service_names = $(if $(S),$(S),$(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++'))
+
+# Проверка аргумента SIZE до записи в etcd: не число или не положительное — отказ.
+require_positive_int = $(if $(filter-out 0,$(shell test $(2) -gt 0 2>/dev/null && echo ok)),,\
+	@echo "$(1) должен быть положительным числом, а не '$(2)'"; exit 1)
+
+# Текущее значение сервисного ключа бюджета из etcd; при недоступном etcd — «ok» (проверку пропускаем:
+# запись всё равно не пройдёт, а решение провижёра — fail-closed с WARN в его логах).
+current_min = $(or $(shell $(COMPOSE) run --rm --no-deps -T etcdctl \
+	get "$(ETCD_ROOT)/services/$(1)/minConnections" 2>/dev/null | sed -n '2p'),ok)
+current_max = $(or $(shell $(COMPOSE) run --rm --no-deps -T etcdctl \
+	get "$(ETCD_ROOT)/services/$(1)/maxConnections" 2>/dev/null | sed -n '2p'),ok)
+conflicts_with_min = $(shell test $(1) -le $(call current_min,$(2)) 2>/dev/null && echo yes)
+exceeds_budget = $(shell test $(1) -gt $(call current_max,$(2)) 2>/dev/null && echo yes)
 
 .DEFAULT_GOAL := help
 
@@ -90,10 +109,37 @@ stress: ## разовый прогон нагрузки через lb-a (DURATIO
 		-e DURATION_S=$(if $(filter-out 0,$(DURATION_S)),$(DURATION_S),20) loadgen
 
 # --- ручные правки конфигурации в etcd ---
-# Адресация: I=имя инстанса (один), S=сервис (все инстансы сервиса), G=группа (все инстансы группы).
+# Адресация: I=имя инстанса (один), S=имя сервиса, G=имя группы.
+# Размер пула задаётся бюджетом сервиса (set-max-connections) — провижёр делит его между живыми
+# инстансами. set-size/set-service-size/set-group-size пишут maximumPoolSize напрямую и живут до
+# ближайшего пересчёта: это временный оверайд, а не способ задать размер пула.
+
+.PHONY: set-max-connections
+set-max-connections: ## бюджет соединений сервиса: make set-max-connections SIZE=100 S=service-a
+	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
+	@$(call require_positive_int,SIZE,$(SIZE))
+	@$(if $(call conflicts_with_min,$(SIZE),$(S)),@echo "минимум сервиса ($(call current_min,$(S))) выше бюджета ($(SIZE)):"; \
+		echo "часть инстансов останется без доли и не будет обслуживать трафик (503)"; exit 1)
+	@echo "etcd: $(ETCD_ROOT)/services/$(S)/maxConnections = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/maxConnections" "$(SIZE)"
+	@sleep 1
+	@$(MAKE) --no-print-directory budget
+	@$(MAKE) --no-print-directory pool
+
+.PHONY: set-min-connections
+set-min-connections: ## минимальная доля инстанса: make set-min-connections SIZE=15 S=service-a
+	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
+	@$(call require_positive_int,SIZE,$(SIZE))
+	@$(if $(call exceeds_budget,$(SIZE),$(S)),@echo "минимум ($(SIZE)) выше бюджета сервиса ($(call current_max,$(S))):"; \
+		echo "провижёр не выполнит распределение и оставит конфигурацию как есть (WARN в его логах)"; exit 1)
+	@echo "etcd: $(ETCD_ROOT)/services/$(S)/minConnections = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(ETCD_ROOT)/services/$(S)/minConnections" "$(SIZE)"
+	@sleep 1
+	@$(MAKE) --no-print-directory budget
+	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-size
-set-size: ## размер пула инстанса: make set-size SIZE=25 [I=имя]
+set-size: ## РАЗМЕР ПУЛА ОВЕРРАЙДОМ: make set-size SIZE=25 [I=имя] — живёт до пересчёта бюджета
 	@$(if $(call tuple_by_I,$(I)),,@echo "не найден инстанс I=$(I)"; exit 1)
 	@echo "etcd: $(call tuple_path,$(call tuple_by_I,$(I)))maximumPoolSize = $(SIZE)"
 	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(call tuple_by_I,$(I)))maximumPoolSize" "$(SIZE)"
@@ -101,14 +147,14 @@ set-size: ## размер пула инстанса: make set-size SIZE=25 [I=и
 	@$(MAKE) --no-print-directory pool I=$(I)
 
 .PHONY: set-service-size
-set-service-size: ## размер пула всех инстансов сервиса: make set-service-size SIZE=25 S=service-a
+set-service-size: ## оверрайд размера всех инстансов сервиса: SIZE=25 S=service-a — живёт до пересчёта
 	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
 	@$(foreach t,$(call tuples_by_S),$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(t))maximumPoolSize" "$(SIZE)";)
 	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-group-size
-set-group-size: ## размер пула всех инстансов группы: make set-group-size SIZE=25 G=group-1
-	@$(if $(G),,@echo "укажи G=имя группы"; exit 1)
+set-group-size: ## оверрайд размера всех инстансов группы: SIZE=25 G=group-1 — живёт до пересчёта
+	@$(if $(G),,@echo "укажи G=имя группа"; exit 1)
 	@$(foreach t,$(call tuples_by_G),$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(t))maximumPoolSize" "$(SIZE)";)
 	@$(MAKE) --no-print-directory pool
 
@@ -127,6 +173,13 @@ set-conn-timeout: ## connectionTimeoutMs инстанса: make set-conn-timeout
 .PHONY: config
 config: ## ключи инстанса из etcd: make config [I=имя]
 	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(call tuple_path,$(call tuple_by_I,$(I)))"
+
+.PHONY: budget
+budget: ## бюджет сервиса: N, m, число живых инстансов, сумма долей (make budget [S=сервис])
+	@$(foreach s,$(call service_names),\
+		printf "== %s ==\n" "$(s)"; \
+		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/$(s)/" -w json \
+			| python3 scripts/budget.py '$(call tuples_by_serv,$(s))' "$(ETCD_ROOT)/services/$(s)/"; )
 
 .PHONY: registrations
 registrations: ## узлы регистрации инстансов в etcd: создаются при старте, исчезают при остановке

@@ -24,12 +24,18 @@ management:
         liveness:
           include: ping
 
-# Провижер — стартовые значения ключей вновь зарегистрированного инстанса.
-# Существующие ключи никогда не перезаписываются (txn put_if_absent).
+# Провижер — сервисный бюджет соединений и стартовые значения ключей вновь зарегистрированного
+# инстанса. maximumPoolSize — управляемый ключ (перезаписывается долей бюджета при пересчёте),
+# остальные существующие ключи никогда не перезаписываются (txn put_if_absent).
 provision:
   endpoints: ${PROV_ETCD_ENDPOINTS:http://localhost:2379}
   root: ${PROV_ETCD_ROOT:/config}
-  maximum-pool-size: ${PROV_MAX_POOL_SIZE:10}
+  # Бюджет соединений сервиса: N делится равномерно между живыми инстансами, сумма долей = N.
+  max-connections: ${PROV_MAX_CONNECTIONS:100}
+  # Минимальная доля инстанса: обслуживаются только те, кому досталось не меньше этого.
+  min-connections: ${PROV_MIN_CONNECTIONS:1}
+  # Верхняя граница доли (зеркалит HikariSettings.POOL_SIZE_MAX у сервиса, доли усекаются).
+  max-share: ${PROV_MAX_SHARE:200}
   connection-timeout-ms: ${PROV_CONNECTION_TIMEOUT_MS:3000}
   call-timeout: ${PROV_CALL_TIMEOUT:5s}
   retry-initial-backoff: ${PROV_RETRY_INITIAL:1s}
