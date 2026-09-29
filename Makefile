@@ -48,7 +48,7 @@ help: ## список целей
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## собрать образы сервиса, нагрузчика и etcdctl
+build: ## собрать образы сервиса, провизора, нагрузчика и etcdctl
 	$(COMPOSE) build
 
 .PHONY: instances
@@ -88,10 +88,6 @@ stress: ## разовый прогон нагрузки через lb-a (DURATIO
 		-e TARGET=$(TARGET) -e STATUS_TARGET=$(STATUS_TARGET) \
 		-e WORKERS=$(WORKERS) -e WORK_MS=$(WORK_MS) -e REPORT_MS=$(REPORT_MS) \
 		-e DURATION_S=$(if $(filter-out 0,$(DURATION_S)),$(DURATION_S),20) loadgen
-
-.PHONY: seed
-seed: ## разложить стартовый конфиг по всем инстансам (идемпотентно)
-	$(COMPOSE) run --rm --no-deps -e SEED_MAX_POOL_SIZE=$(SIZE) etcd-seed
 
 # --- ручные правки конфигурации в etcd ---
 # Адресация: I=имя инстанса (один), S=сервис (все инстансы сервиса), G=группа (все инстансы группы).
@@ -159,5 +155,6 @@ service-restart: ## перезапустить инстанс: make service-rest
 	$(COMPOSE) restart $(P)
 
 .PHONY: test
-test: ## юнит-тесты сервиса
+test: ## юнит-тесты сервиса и провизора
 	cd service && mvn -B -q test
+	cd provisioner && mvn -B -q test

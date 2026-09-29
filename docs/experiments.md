@@ -8,7 +8,7 @@
 
 Все цифры сняты с живого стенда (`make up`, PostgreSQL 16, etcd 3.6.15, ноутбук без тюнинга).
 Стенд: `loadgen` с 4 постоянными потоками по 25мс, если не указано иное. Пул = 10 по умолчанию,
-`connectionTimeoutMs` = 3000 (его кладёт etcd-seed), `eager-fill-on-resize=true`.
+`connectionTimeoutMs` = 3000 (его кладёт config-provisioner), `eager-fill-on-resize=true`.
 
 ## Рост и сжатие пула на живом сервисе
 

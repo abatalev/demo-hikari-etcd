@@ -28,7 +28,7 @@ management:
           include: ping
 
 # Дефолты приложения. Любой из этих параметров можно переопределить в etcd
-# (см. etcd/seed-config.sh) — etcd всегда выигрывает.
+# (стартовые ключи нового инстанса кладёт config-provisioner) — etcd всегда выигрывает.
 pool:
   db:
     jdbc-url: ${DB_URL:jdbc:postgresql://localhost:5432/demo}

@@ -1,11 +1,9 @@
 name: hikari-etcd-stand
 
-# Один образ с etcdctl: и автосидинг конфига при up, и ручные правки из Makefile.
+# Образ с etcdctl для ручных правок конфигурации из Makefile (make config / set-size и т.п.).
 x-etcdctl: &etcdctl
   image: hikari-etcd/etcdctl:local
   build: ./etcd
-  volumes:
-    - ./etcd:/seed:ro
   environment:
     ETCDCTL_ENDPOINTS: http://etcd:2379
     ETCDCTL_API: "3"
@@ -20,8 +18,6 @@ x-service: &service
   depends_on:
     postgres:
       condition: service_healthy
-    etcd-seed:
-      condition: service_completed_successfully
   environment: &service-env
     DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-demo}
     DB_USER: ${POSTGRES_USER:-app}
@@ -91,21 +87,28 @@ services:
       timeout: 3s
       retries: 20
 
-  # Раскладывает стартовый конфиг по всем инстансам ETCD_INSTANCES (идемпотентно) и выходит.
-  etcd-seed:
-    <<: *etcdctl
+  # Провижинер конфигурации: появление узла регистрации инстанса -> в путь кладутся
+  # отсутствующие стартовые ключи hikari/*, исчезновение узла -> весь префикс удаляется.
+  # Стартовые ключи кладутся атомарно и только если их ещё нет (ручные правки не затираются).
+  config-provisioner:
+    image: hikari-etcd/config-provisioner:local
+    build: ./provisioner
+    mem_limit: 512m
     depends_on:
       etcd:
         condition: service_healthy
     environment:
-      ETCDCTL_ENDPOINTS: http://etcd:2379
-      ETCDCTL_API: "3"
-      ETCD_ROOT: ${ETCD_ROOT:-/config}
-      # Канонический список инстансов (service|group|instance|hostPort) из .env.
-      ETCD_INSTANCES: ${ETCD_INSTANCES:-service-a|group-1|service-a-group-1-1|18081 service-a|group-1|service-a-group-1-2|18082 service-a|group-2|service-a-group-2-1|18083 service-a|group-2|service-a-group-2-2|18084 service-b|group-1|service-b-group-1-1|18085 service-b|group-1|service-b-group-1-2|18086 service-b|group-2|service-b-group-2-1|18087 service-b|group-2|service-b-group-2-2|18088}
-      SEED_MAX_POOL_SIZE: ${SEED_MAX_POOL_SIZE:-10}
-    entrypoint: ["/bin/sh", "/seed/seed-config.sh"]
-    restart: "no"
+      PROV_ETCD_ENDPOINTS: http://etcd:2379
+      PROV_ETCD_ROOT: ${ETCD_ROOT:-/config}
+      PROV_MAX_POOL_SIZE: ${PROV_MAX_POOL_SIZE:-10}
+      PROV_CONNECTION_TIMEOUT_MS: ${PROV_CONNECTION_TIMEOUT_MS:-3000}
+    healthcheck:
+      # Живость — только ping: провижининг переживает обрывы etcd сам.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 60s
+      retries: 60
 
   # --- инстансы service-a (группы group-1, group-2) ---
   service-a-group-1-1:
