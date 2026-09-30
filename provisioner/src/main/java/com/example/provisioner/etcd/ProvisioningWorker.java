@@ -58,6 +58,9 @@ final class ProvisioningWorker implements Runnable {
     /** Период поллинга маркеров групп {@code {root}/groups/} — пересчёт по смене флага группы. */
     private static final long GROUP_POLL_MS = 1_000L;
 
+    /** Сегмент префикса конфигурации в полном ключе — нужен, чтобы опознать потолок узла. */
+    private static final String HIKARI_SEGMENT = "hikari/";
+
     /** Снимок поддерева сервиса: чего в нём живого, что осталось от конфигурации, каков бюджет. */
     private static final class Tree {
 
@@ -70,6 +73,16 @@ final class ProvisioningWorker implements Runnable {
         private final Map<String, String> budget = new HashMap<>();
         /** Имена групп этого сервиса, помеченных inactive (маркер равен «false»). */
         private final Set<String> inactiveGroups = new HashSet<>();
+        /**
+         * Текущее значение {@code maximumPoolSize} по ключу узла (0, если ключа нет) и его
+         * {@code mod_revision} — им помечается команда, на которую инстанс мог ответить публикацией.
+         */
+        private final Map<String, KeyValue> ceilings = new HashMap<>();
+        /**
+         * Публикация неосвобождённого сжатия по ключу узла: значение и {@code mod_revision}.
+         * Публикация подтверждает текущую команду узла, только если она записана позже неё.
+         */
+        private final Map<String, KeyValue> reports = new HashMap<>();
 
         private Tree(long revision) {
             this.revision = revision;
@@ -87,6 +100,12 @@ final class ProvisioningWorker implements Runnable {
 
     /** Последнее известное состояние маркеров групп (группа → активна); под {@link #lock}. */
     private Map<String, Boolean> lastFleetMarkers = new HashMap<>();
+    /** Когда узел последний раз предъявлял ту же величину долга; только для диагностики. */
+    private final Map<String, Long> stuckDebtSince = new HashMap<>();
+    /** Последняя предъявленная величина долга по узлу; только для диагностики. */
+    private final Map<String, Integer> stuckDebtValue = new HashMap<>();
+    /** Узлы, о зависшем долге которых уже сказано в журнал — не повторяемся на каждом проходе. */
+    private final Set<String> stuckDebtWarned = new HashSet<>();
     /** Группы, к которым относятся узлы этого сервиса; обновляется в {@link #scan}. */
     private volatile Set<String> myGroups = Set.of();
 
@@ -183,15 +202,27 @@ final class ProvisioningWorker implements Runnable {
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
 
         Tree tree = new Tree(resp.getHeader().getRevision());
+        String root = owner.properties().getRoot();
         for (KeyValue kv : resp.getKvs()) {
             String key = kv.getKey().toString(StandardCharsets.UTF_8);
             String value = kv.getValue().toString(StandardCharsets.UTF_8);
-            InstanceKey.Parsed parsed = InstanceKey.parse(owner.properties().getRoot(), key);
+            InstanceKey.Parsed parsed = InstanceKey.parse(root, key);
             if (parsed instanceof InstanceKey.Node n) {
                 tree.nodes.put(key, n);
             } else if (parsed instanceof InstanceKey.Config cfg) {
-                tree.configPrefixes.add(InstanceKey.hikariPrefix(owner.properties().getRoot(),
-                        cfg.service(), cfg.group(), cfg.instance()));
+                String nodeKey = InstanceKey.nodeKey(root, cfg.service(), cfg.group(), cfg.instance());
+                tree.configPrefixes.add(InstanceKey.hikariPrefix(root, cfg.service(), cfg.group(),
+                        cfg.instance()));
+                if (isCeilingKey(key, nodeKey)) {
+                    // Значение и revision потолка: revision помечает команду, на которую инстанс
+                    // мог ответить публикацией. Без него свежесть публикации не проверить.
+                    tree.ceilings.put(nodeKey, kv);
+                }
+            } else if (parsed instanceof InstanceKey.Publication pub) {
+                // Публикация — ответ инстанса, а не настройка пула: в доли и в осиротевшие префиксы
+                // она не попадает, но нужна для ограничения роста.
+                String nodeKey = InstanceKey.nodeKey(root, pub.service(), pub.group(), pub.instance());
+                tree.reports.put(nodeKey, kv);
             } else if (parsed instanceof InstanceKey.ServiceSetting s) {
                 tree.budget.put(s.setting(), value);
             } else {
@@ -296,12 +327,27 @@ final class ProvisioningWorker implements Runnable {
      * считать состав одновременно.
      */
     private void apply(Client c, Tree tree) throws Exception {
+        provision(c, tree, true);
+    }
+
+    /**
+     * Провижинирование сервиса.
+     *
+     * <p>Один путь на оба повода: полный пересчёт и пересчёт по публикации. Разница только в
+     * {@code full} — создание ключей бюджета, стартовых ключей инстанса и уборка осиротевших
+     * префиксов относятся к полному пересчёту. Публикация этими правами не пользуется: она
+     * меняет только величину роста и не должна трогать доли, состав и уборку.
+     *
+     * @param full true — полный пересчёт (событие узла, ключа бюджета, маркера группы, старт);
+     *     false — только пересчёт роста по публикации
+     */
+    private void provision(Client c, Tree tree, boolean full) throws Exception {
         Integer budget = budgetValue(c, InstanceKey.ACTIVE_MAX_CONNECTIONS,
-                owner.properties().getActiveMaxConnections(), tree);
+                owner.properties().getActiveMaxConnections(), tree, full);
         Integer min = budgetValue(c, InstanceKey.ACTIVE_MIN_CONNECTIONS,
-                owner.properties().getActiveMinConnections(), tree);
+                owner.properties().getActiveMinConnections(), tree, full);
         Integer reserve = budgetValue(c, InstanceKey.INACTIVE_MAX_CONNECTIONS,
-                owner.properties().getInactiveMaxConnections(), tree);
+                owner.properties().getInactiveMaxConnections(), tree, full);
         if (budget == null || min == null || reserve == null) {
             // Нечисловое значение сервисного ключа: fail-closed, конфигурацию не трогаем.
             log.warn("сервис {}: нечисловое значение ключа бюджета ({}/{}/{}), живы {} узлов: "
@@ -375,39 +421,189 @@ final class ProvisioningWorker implements Runnable {
             }
         }
 
-        Map<String, String> shareByPrefix = new HashMap<>();
-        for (Map.Entry<String, Integer> share : shares.entrySet()) {
-            InstanceKey.Node node = tree.nodes.get(share.getKey());
-            String prefix = InstanceKey.hikariPrefix(owner.properties().getRoot(),
-                    node.service(), node.group(), node.instance());
-            shareByPrefix.put(prefix, String.valueOf(share.getValue()));
+        // План роста поверх целевых долей: сначала сжатие, рост — только на то, что инстансы
+        // действительно освободили и о чём отчитались публикацией.
+        ConnectionGrowth.Result plan = planGrowth(tree, shares, budget);
+        Map<String, String> hikariPrefixByNode = new HashMap<>();
+        for (String nodeKey : tree.nodes.keySet()) {
+            InstanceKey.Node node = tree.nodes.get(nodeKey);
+            hikariPrefixByNode.put(nodeKey, InstanceKey.hikariPrefix(owner.properties().getRoot(),
+                    node.service(), node.group(), node.instance()));
         }
 
         int resizes = 0;
-        for (Map.Entry<String, String> entry : shareByPrefix.entrySet()) {
-            resizes += setPoolSize(c, entry.getKey(), entry.getValue());
-            ensureKey(c, entry.getKey(), "connectionTimeoutMs",
-                    String.valueOf(owner.properties().getConnectionTimeoutMs()));
+        int grew = 0;
+        int deferred = 0;
+        Set<String> servedPrefixes = new HashSet<>();
+        for (ConnectionGrowth.Decision decision : plan.decisions()) {
+            if (!decision.servable()) {
+                // Места под долю ещё нет: инстанс остаётся необслуживаемым (503, конфигурации
+                // нет) и получит долю сам, когда освободится. Ноль не пишется намеренно — сервис
+                // отклоняет максимум 0, и REJECTED-конфиг гейт трафика не удерживает.
+                deferred++;
+                continue;
+            }
+            String prefix = hikariPrefixByNode.get(decision.nodeKey());
+            servedPrefixes.add(prefix);
+            resizes += setPoolSize(c, prefix, String.valueOf(decision.command()));
+            if (decision.grows()) {
+                grew++;
+            }
+            if (full && !tree.configPrefixes.contains(prefix)) {
+                // Префикса ещё нет: инстанс ещё не обслуживался, и стартовые ключи ему нужны.
+                // Ставим их только когда доля действительно выдана, а не пока ждём освобождения.
+                ensureKey(c, prefix, "connectionTimeoutMs",
+                        String.valueOf(owner.properties().getConnectionTimeoutMs()));
+            }
         }
 
         // Избыток (доля не досталась), холод (R=0) и осиротевшие префиксы конфигурации — одинаково
         // не имеют права на ключи: без них инстанс не обслуживает трафик (503) и не держит
-        // соединений.
+        // соединений. Публикация сюда не вмешивается: уборка по составу — не её дело.
         int cleaned = 0;
-        Set<String> servedPrefixes = new HashSet<>(shareByPrefix.keySet());
-        for (String prefix : tree.configPrefixes) {
-            if (!servedPrefixes.contains(prefix)) {
-                wipe(c, prefix);
-                cleaned++;
+        if (full) {
+            for (String prefix : tree.configPrefixes) {
+                if (!servedPrefixes.contains(prefix)) {
+                    wipe(c, prefix);
+                    cleaned++;
+                }
             }
         }
 
-        if (resizes > 0 || cleaned > 0 || excess > 0 || k > 0 || !activeKeys.isEmpty()) {
+        reportStuckDebt(tree, plan);
+
+        if (resizes > 0 || cleaned > 0 || deferred > 0 || excess > 0 || k > 0
+                || !activeKeys.isEmpty()) {
             log.info("пересчёт сервиса {}: N={}, m={}, R={}, активных {}, неактивных (k) {}, "
-                            + "обслуживается {}, избыток {}, изменено размеров {}, очищено префиксов {}",
+                            + "обслуживается {}, избыток {}, изменено размеров {} (из них рост {}), "
+                            + "очищено префиксов {}, ждут места {}, потолки {}, долги {}, "
+                            + "занято {}, свободно роста {}",
                     service, budget, min, reserve, activeKeys.size(), k, shares.size(),
-                    excess, resizes, cleaned);
+                    excess, resizes, grew, cleaned, deferred, plan.sumCeilings(), plan.sumDebt(),
+                    plan.sumHeld(), plan.growable());
         }
+    }
+
+    /** Ключ {@code maximumPoolSize} внутри префикса конфигурации узла. */
+    private boolean isCeilingKey(String fullKey, String nodeKey) {
+        return fullKey.equals(nodeKey + HIKARI_SEGMENT + "maximumPoolSize");
+    }
+
+    /**
+     * План роста поверх целевых долей: превращает снимок и распределение в команды записи.
+     *
+     * <p>Все величины берутся из снимка, поэтому повторный пересчёт после потери лидерства даёт
+     * тот же результат: провизёр не хранит состояние между событиями.
+     */
+    private ConnectionGrowth.Result planGrowth(Tree tree, Map<String, Integer> shares, int budget) {
+        List<ConnectionGrowth.NodeState> states = new ArrayList<>();
+        for (String nodeKey : tree.nodes.keySet()) {
+            states.add(new ConnectionGrowth.NodeState(nodeKey, ceilingOf(tree, nodeKey),
+                    shares.get(nodeKey), reportOf(tree, nodeKey), reportAcknowledged(tree, nodeKey)));
+        }
+        return ConnectionGrowth.plan(budget, states);
+    }
+
+    /** Текущее значение {@code maximumPoolSize} узла; 0, если ключа нет или значение мусор. */
+    private int ceilingOf(Tree tree, String nodeKey) {
+        KeyValue kv = tree.ceilings.get(nodeKey);
+        if (kv == null) {
+            return 0;
+        }
+        Integer value = parseCount(nodeKey, "maximumPoolSize",
+                kv.getValue().toString(StandardCharsets.UTF_8));
+        return value == null ? 0 : Math.max(0, value);
+    }
+
+    /** Опубликованное неосвобождённое сжатие узла; {@code null}, если публикации нет. */
+    private Integer reportOf(Tree tree, String nodeKey) {
+        KeyValue kv = tree.reports.get(nodeKey);
+        if (kv == null) {
+            return null;
+        }
+        Integer value = parseCount(nodeKey, InstanceKey.UNRELEASED_CONNECTIONS,
+                kv.getValue().toString(StandardCharsets.UTF_8));
+        return value == null ? null : Integer.valueOf(Math.max(0, value));
+    }
+
+    /**
+     * Относится ли публикация к текущему потолку.
+     *
+     * <p>Не подтверждённая величина непригодна: инстанс писал её, когда держал другое число
+     * соединений. Тогда берётся худший случай — инстанс держит всё, что мог, то есть потолок.
+     */
+    private boolean reportAcknowledged(Tree tree, String nodeKey) {
+        KeyValue report = tree.reports.get(nodeKey);
+        if (report == null) {
+            return false;
+        }
+        KeyValue ceiling = tree.ceilings.get(nodeKey);
+        return ceiling == null || report.getModRevision() > ceiling.getModRevision();
+    }
+
+    /**
+     * Нечисловое значение ключа узла игнорируется только для себя: остальные величины считаются
+     * как есть, для этого ключа берётся худший случай.
+     */
+    private Integer parseCount(String nodeKey, String name, String raw) {
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            log.warn("сервис {}: {} узла {} не является числом: \"{}\" — беру худший случай",
+                    service, name, nodeKey, raw);
+            return null;
+        }
+    }
+
+    /**
+     * Долг, который не меняется дольше порога, виден в журнале с числами; место не
+     * перераспределяется.
+     *
+     * <p>Это состояние «инстанс сжат, но не отпускает»: зависший запрос или утекшее соединение.
+     * Флот при этом работает меньше бюджета, что безопасно; отдать место вслепую нельзя, иначе
+     * сумма превысит N. Состояние между проходами живёт только для диагностики и на пересчёт не
+     * влияет, поэтому после потери лидерства предупреждение просто начнётся заново.
+     */
+    private void reportStuckDebt(Tree tree, ConnectionGrowth.Result plan) {
+        long now = System.currentTimeMillis();
+        long thresholdMs = owner.properties().getStuckDebtWarnMs();
+        if (thresholdMs <= 0) {
+            return;
+        }
+        for (ConnectionGrowth.Decision decision : plan.decisions()) {
+            int debt = debtOf(tree, decision.nodeKey());
+            if (debt <= 0) {
+                // Долга нет: забываем узел, чтобы предупреждение не всплыло снова после
+                // следующего сжатия с другой величиной.
+                stuckDebtSince.remove(decision.nodeKey());
+                stuckDebtValue.remove(decision.nodeKey());
+                stuckDebtWarned.remove(decision.nodeKey());
+                continue;
+            }
+            Long since = stuckDebtSince.get(decision.nodeKey());
+            Integer previous = stuckDebtValue.get(decision.nodeKey());
+            if (previous != null && previous == debt && since != null && now - since >= thresholdMs) {
+                if (stuckDebtWarned.add(decision.nodeKey())) {
+                    log.warn("сервис {}: неосвобождённое сжатие узла {} держится на {} соединениях "
+                                    + "дольше {} с (потолок {}, доля {}, приказано {}) — место не "
+                                    + "перераспределяется, флот работает меньше бюджета",
+                            service, decision.nodeKey(), debt, (now - since) / 1000,
+                            ceilingOf(tree, decision.nodeKey()), decision.target(),
+                            decision.command());
+                }
+            } else if (previous == null || previous != debt) {
+                stuckDebtSince.put(decision.nodeKey(), now);
+                stuckDebtValue.put(decision.nodeKey(), debt);
+                stuckDebtWarned.remove(decision.nodeKey());
+            }
+        }
+    }
+
+    /** Долг узла по снимку: публикация, если подтверждена, иначе худший случай — потолок. */
+    private int debtOf(Tree tree, String nodeKey) {
+        return ConnectionGrowth.debt(new ConnectionGrowth.NodeState(nodeKey,
+                ceilingOf(tree, nodeKey), null, reportOf(tree, nodeKey),
+                reportAcknowledged(tree, nodeKey)));
     }
 
     /**
@@ -418,10 +614,14 @@ final class ProvisioningWorker implements Runnable {
      *
      * @return действующее значение ключа, либо {@code null} — значение есть, но не число
      */
-    private Integer budgetValue(Client c, String setting, int defaultValue, Tree tree)
+    private Integer budgetValue(Client c, String setting, int defaultValue, Tree tree, boolean create)
             throws Exception {
         String raw = tree.budget.get(setting);
         if (raw == null) {
+            if (!create) {
+                // Пересчёт по публикации: ключи бюджета не создаём, их дело — полного пересчёта.
+                return defaultValue;
+            }
             String key = InstanceKey.serviceSettingKey(owner.properties().getRoot(), service, setting);
             TxnResponse resp = c.getKVClient().txn()
                     .If(new Cmp(ConfigProvisioner.bs(key), Cmp.Op.EQUAL,
@@ -570,6 +770,14 @@ final class ProvisioningWorker implements Runnable {
             } else if (parsed instanceof InstanceKey.Config) {
                 // События конфигурации (свои записи и ручные правки) игнорируются — петель нет.
                 log.debug("сервис {}: событие ключа конфигурации {} игнорируется", service, key);
+            } else if (parsed instanceof InstanceKey.Publication) {
+                // Публикация не меняет бюджет, состав и активность групп, поэтому целевые доли не
+                // пересчитываются. Меняется только величина, на которую доля может вырасти, —
+                // это и есть пересчёт роста. Если рост никому ничего не освобождает, записи
+                // не будет вовсе.
+                log.debug("сервис {}: публикация неосвобождённого сжатия {} — пересчитываю рост",
+                        service, key);
+                reevaluateGrowth();
             } else {
                 warnUnknownKey(key);
             }
@@ -589,6 +797,22 @@ final class ProvisioningWorker implements Runnable {
         Client c = owner.client();
         Tree tree = scan(c);
         apply(c, tree);
+    }
+
+    /**
+     * Пересчёт по публикации неосвобождённого сжатия.
+     *
+     * <p>Снимок берётся целиком, а не по одному узлу: освободившееся место видно только в сумме по
+     * флоту, и решение «кому можно расти» из одного значения не выводится.
+     *
+     * <p>Провижинируется только величина роста: доли, чьи значения не изменились, не пишутся вовсе
+     * (запись conditional), ключи бюджета и стартовые ключи не создаются, уборка не выполняется.
+     * Если рост никому ничего не освобождает, не пишется ни одного ключа — петли не возникает.
+     */
+    private void reevaluateGrowth() throws Exception {
+        Client c = owner.client();
+        Tree tree = scan(c);
+        provision(c, tree, false);
     }
 
     private void warnUnknownKey(String key) {

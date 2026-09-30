@@ -40,6 +40,10 @@ provision:
   # Верхняя граница доли (зеркалит HikariSettings.POOL_SIZE_MAX у сервиса, доли усекаются).
   max-share: ${PROV_MAX_SHARE:200}
   connection-timeout-ms: ${PROV_CONNECTION_TIMEOUT_MS:3000}
+  # Порог предупреждения о зависшем неосвобождённом сжатии: дольше него величина попадает в
+  # журнал с числами, место при этом не перераспределяется (флот работает меньше бюджета).
+  # 0 — не предупреждать.
+  stuck-debt-warn-ms: ${PROV_STUCK_DEBT_WARN_MS:30000}
   call-timeout: ${PROV_CALL_TIMEOUT:5s}
   retry-initial-backoff: ${PROV_RETRY_INITIAL:1s}
   retry-max-backoff: ${PROV_RETRY_MAX:30s}

@@ -21,6 +21,17 @@ public final class EtcdKeyPath {
     /** Сегмент с ключами настроек пула; одинаков для всех инстансов. */
     public static final String HIKARI = "hikari";
 
+    /**
+     * Ключ публикации неосвобождённого сжатия.
+     *
+     * <p>Лежит рядом с узлом регистрации, но <em>вне</em> префикса {@code hikari/}: это не
+     * настройка пула, а ответ инстанса провижёру. Поэтому он не попадает ни в снимок
+     * конфигурации, ни в события watch, не помечается как неизвестный ключ и не влияет на
+     * применяемую конфигурацию. Отдельный уровень вложенности не заводим: ключ держим на аренде
+     * узла регистрации, поэтому исчезает вместе с узлом сам.
+     */
+    public static final String UNRELEASED_CONNECTIONS = "unreleasedConnections";
+
     /** Маркер сегмента сервиса; фиксирован и одинаков для всех инстансов. */
     public static final String SERVICES = "services";
 
@@ -57,6 +68,17 @@ public final class EtcdKeyPath {
         String trimmedRoot = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
         return trimmedRoot + "/" + SERVICES + "/" + service + "/" + GROUPS + "/" + group
                 + "/" + INSTANCES + "/" + instance + "/";
+    }
+
+    /**
+     * Путь ключа публикации неосвобождённого сжатия: путь узла регистрации плюс имя ключа.
+     *
+     * <p>Тот же уровень, что и узел регистрации. Ключ держится на аренде узла, поэтому отдельной
+     * очистки не требует: инстанс исчез — исчезло и опубликованное значение.
+     */
+    public static String unreleasedConnectionsPath(String root, String service, String group,
+            String instance) {
+        return nodePath(root, service, group, instance) + UNRELEASED_CONNECTIONS;
     }
 
     private static void requireSegment(String segment, String name) {

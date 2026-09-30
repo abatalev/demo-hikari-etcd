@@ -79,6 +79,15 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     /** Узел регистрации инстанса (путь без хвоста {@code hikari/}); null, когда источник выключен. */
     private final String nodePath;
 
+    /**
+     * Ключ публикации неосвобождённого сжатия; null, когда источник выключен.
+     *
+     * <p>Лежит рядом с узлом регистрации и вне префикса {@code hikari/}, поэтому конфиг-воркер его
+     * не видит: ни снимок, ни watch его не касаются, и опубликованная величина никогда не
+     * попадает в применяемую конфигурацию.
+     */
+    private final String unreleasedPath;
+
     private final Map<String, String> keys = new ConcurrentHashMap<>();
     private final Map<String, String> reportedProblems = new ConcurrentHashMap<>();
     private final Set<String> warnedUnknownKeys = ConcurrentHashMap.newKeySet();
@@ -99,6 +108,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private volatile Client client;
     private volatile Thread watcherThread;
     private volatile Thread registrationThread;
+    private volatile Thread publicationThread;
 
     public EtcdPoolConfigSource(ManagedPool pool, DbProperties dbProperties, EtcdProperties properties,
             ApplicationEventPublisher eventPublisher) {
@@ -111,9 +121,12 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                     properties.getGroup(), properties.getInstance());
             this.nodePath = EtcdKeyPath.nodePath(properties.getRoot(), properties.getService(),
                     properties.getGroup(), properties.getInstance());
+            this.unreleasedPath = EtcdKeyPath.unreleasedConnectionsPath(properties.getRoot(),
+                    properties.getService(), properties.getGroup(), properties.getInstance());
         } else {
             this.path = null;
             this.nodePath = null;
+            this.unreleasedPath = null;
         }
     }
 
@@ -157,8 +170,27 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 .name("etcd-registration")
                 .unstarted(this::registrationLoop);
         registrationThread.start();
+        // Публикация неосвобождённого сжатия — тоже отдельный поток: она ждёт смены конфигурации
+        // и опрашивает пул, пока место не освободится, и не должна блокировать watch.
+        publicationThread = Thread.ofPlatform()
+                .daemon(true)
+                .name("etcd-drain-publication")
+                .unstarted(this::publicationLoop);
+        publicationThread.start();
     }
 
+    /**
+     * Штатная остановка: сперва освобождаем соединения, потом снимаем регистрацию.
+     *
+     * <p>Порядок обязателен. Регистрация держит долю бюджета: пока узел жив, провижёр не отдаст
+     * его место никому. Если снять регистрацию первым, провижёр немедленно перераспределит долю,
+     * а наш пул ещё держит соединения — сумма по флоту превысит бюджет на всё время дренажа.
+     * И наоборот: дренаж не должен ждать etcd, поэтому узел остаётся видимым до конца.
+     *
+     * <p>Потоки останавливаем первыми, чтобы во время дренажа не пришло новое событие watch и не
+     * открылся пул заново. Публикацию тоже глушим: во время остановки величина долга не имеет
+     * смысла — узел всё равно исчезнет вместе с ключом.
+     */
     @Override
     public void stop() {
         if (!running.compareAndSet(true, false)) {
@@ -172,7 +204,22 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
         if (r != null) {
             r.interrupt();
         }
-        // Отзываем аренду до закрытия клиента; пробуем дважды, чтобы поймать аренду,
+        Thread p = publicationThread;
+        if (p != null) {
+            p.interrupt();
+        }
+        // Дренаж идёт при живом узле регистрации: место освобождается прежде, чем доля уйдёт.
+        // close() дренирует активные соединения с таймаутом и только потом закрывает пул.
+        if (w != null) {
+            try {
+                w.join(properties.getCallTimeout().toMillis() + 1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        pool.close();
+        log.info("пул освобождён перед снятием регистрации");
+        // Отзываем аренду после дренажа; пробуем дважды, чтобы поймать аренду,
         // которую поток успел выдать, но ещё не опубликовал до первого захода.
         revokeRegistration();
         if (r != null) {
@@ -300,6 +347,112 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 }
                 backoffMs = Math.min(backoffMs * 2, properties.getRetryMaxBackoff().toMillis());
             }
+        }
+    }
+
+    /**
+     * Публикация неосвобождённого сжатия: сколько соединений инстанс держит сверх потолка.
+     *
+     * <p>Пока долг равен нулю, поток спит на смене конфигурации — ждать нечего, публикаций нет
+     * и не должно быть. Как только применение конфигурации состоялось, берём долг у пула: он
+     * положителен ровно тогда, когда сжатие ещё не освободило соединения, и обновляется по мере
+     * их возврата. Терминальный ноль публикуем безусловно — на нём держится разблокировка роста.
+     *
+     * <p>Пока долг ненулевой, опрашиваем пул по таймеру: на пути сжатия активные соединения
+     * возвращаются уже после применения конфигурации, и события в etcd об их возврате не приходят.
+     * Публикация по событию, а не по расписанию: значение меняется вместе с числом соединений.
+     *
+     * <p>Запись идёт по аренде узла регистрации, поэтому ключ исчезает вместе с узлом и провизёр
+     * не считает его осиротевшим. Отдельного запроса от провизёра не требуется.
+     */
+    private void publicationLoop() {
+        Integer lastPublished = null;
+        long version = -1;
+        long idleMs = properties.getPublishIdleInterval().toMillis();
+        long pollMs = properties.getPublishPollInterval().toMillis();
+        int quantum = properties.getPublishQuantum();
+
+        while (running.get()) {
+            try {
+                // Ждём смены конфигурации, пока публиковать нечего. Таймаут — страховка на случай,
+                // если сигнал потеряется: повторная проверка дёшева, а молчание опасно.
+                long previous = version;
+                version = pool.awaitAppliedChange(version, idleMs);
+                boolean ceilingChanged = version != previous;
+
+                int debt = pool.runtime().unreleasedConnections();
+                Integer publish = DrainDebtPolicy.toPublish(debt, lastPublished, ceilingChanged,
+                        quantum);
+                if (publish != null && publishDebt(publish, debt)) {
+                    // Запоминаем только действительно записанное: иначе ранняя неудача (клиент
+                    // ещё не создан) навсегда заглушила бы публикацию, а провижёр — видел бы
+                    // худший случай и не выдавал место флоту.
+                    lastPublished = publish;
+                }
+                if (debt == 0) {
+                    // Место освобождено (или сжатия не было) — дальше снова ждём конфигурации.
+                    continue;
+                }
+                // Долг ненулевой: освобождение идёт постепенно, наблюдаем за ним. Заодно
+                // вытесняем всё, что оказалось сверх потолка: публикация уже ушла, а лишнее
+                // соединение иначе дожило бы до появления ожидающего и держало место занятым.
+                pool.evictAboveCeiling();
+                version = pool.appliedVersion();
+                if (!sleep(pollMs)) {
+                    return;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (RuntimeException e) {
+                lastError.set(e.toString());
+                log.warn("публикация неосвобождённого сжатия не удалась: {}", e.toString());
+                if (!sleep(pollMs)) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * Пишет величину долга по аренде узла регистрации.
+     *
+     * <p>Аренда та же, что у узла регистрации: публикация обязана исчезнуть вместе с инстансом,
+     * иначе после его смерти провижёр до упора считал бы, что место занято.
+     *
+     * @return true, если значение действительно записано
+     */
+    private boolean publishDebt(int value, int debt) {
+        Client c = client;
+        if (c == null || unreleasedPath == null) {
+            return false;
+        }
+        long lease = registrationLease.get();
+        if (lease <= 0) {
+            // Аренда ещё не выдана. Ключ без аренды пережил бы инстанс и вечно держал бы место
+            // занятым, поэтому ждём регистрации, а не пишем «на всякий случай».
+            return false;
+        }
+        try {
+            c.getKVClient()
+                    .put(
+                            ByteSequence.from(unreleasedPath, StandardCharsets.UTF_8),
+                            ByteSequence.from(Integer.toString(value), StandardCharsets.UTF_8),
+                            PutOption.newBuilder().withLeaseId(lease).build())
+                    .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            log.info("опубликовано неосвобождённое сжатие: {} (потолок {}, удерживается {})",
+                    value, pool.runtime().maximumPoolSize(), debt);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            // Провал публикации не должен ронять сервис: провижёр увидит худший случай и не выдаст
+            // место преждевременно. Значение не запоминается, поэтому следующая попытка его повторит.
+            lastError.set(e.toString());
+            log.warn("не удалось опубликовать неосвобождённое сжатие {}: {} — место остаётся незанятым",
+                    value, e.toString());
+            return false;
         }
     }
 

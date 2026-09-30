@@ -65,6 +65,13 @@ pool:
     retry-max-backoff: ${ETCD_RETRY_MAX:30s}
     # TTL аренды узла регистрации инстанса; keepalive идёт каждые TTL/3.
     registration-ttl: ${ETCD_REGISTRATION_TTL:15s}
+    # Публикация неосвобождённого сжатия (сколько соединений держим сверх потолка) — по аренде
+    # узла, ключ рядом с узлом регистрации, вне hikari/. Публикуется по изменению величины.
+    # publish-quantum: 0 = публиковать каждое изменение (по умолчанию); ненулевое значение
+    # пропускает промежуточные значения мельче кванта, на терминальный ноль не действует.
+    publish-quantum: ${ETCD_PUBLISH_QUANTUM:0}
+    publish-poll-interval: ${ETCD_PUBLISH_POLL:1s}
+    publish-idle-interval: ${ETCD_PUBLISH_IDLE:5s}
 
 logging:
   level:

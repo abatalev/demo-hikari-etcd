@@ -1,6 +1,7 @@
 package com.example.provisioner.etcd;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 import org.junit.jupiter.api.Test;
@@ -199,6 +200,52 @@ class InstanceKeyTest {
                 "/config/services/service-a/activeMinConnections",
                 "/config/services/service-a/inactiveMaxConnections",
                 "/config/services/service-b/activeMaxConnections");
+        assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT, keys));
+    }
+
+    @Test
+    void parsesPublicationKeyAsAnswerNotAsConfig() {
+        String key = InstanceKey.unreleasedConnectionsKey(ROOT, "service-a", "group-1",
+                "service-a-group-1-1");
+        assertEquals("/config/services/service-a/groups/group-1/instances/service-a-group-1-1/"
+                + "unreleasedConnections", key);
+
+        InstanceKey.Parsed parsed = InstanceKey.parse(ROOT, key);
+        InstanceKey.Publication publication = assertInstanceOf(InstanceKey.Publication.class, parsed);
+        assertEquals("service-a", publication.service());
+        assertEquals("group-1", publication.group());
+        assertEquals("service-a-group-1-1", publication.instance());
+        // Публикация — не настройка пула и не узел регистрации: иначе её удаление сочли бы за
+        // исчезновение инстанса, а чтение — за осиротевший префикс конфигурации.
+        assertFalse(parsed instanceof InstanceKey.Config);
+        assertFalse(parsed instanceof InstanceKey.Node);
+    }
+
+    @Test
+    void publicationKeyIsNotAnOrphanedConfigPrefix() {
+        // Префиксы конфигурации собираются из Config: публикация не должна попасть в уборку,
+        // иначе снятие доли удалило бы ключ раньше, чем инстанс допишет в него освобождение.
+        var publication = assertInstanceOf(InstanceKey.Publication.class, InstanceKey.parse(ROOT,
+                InstanceKey.unreleasedConnectionsKey(ROOT, "service-a", "group-1", "i")));
+        assertEquals("service-a", publication.service());
+        assertEquals("group-1", publication.group());
+        assertEquals("i", publication.instance());
+    }
+
+    @Test
+    void rejectsKeyThatLooksLikePublicationButIsNotOne() {
+        // Тот же узел, но лишний сегмент или другое имя — это уже опечатка, а не публикация.
+        assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT,
+                "/config/services/a/groups/g/instances/i/unreleasedConnections/extra"));
+        assertInstanceOf(InstanceKey.Other.class, InstanceKey.parse(ROOT,
+                "/config/services/a/groups/g/instances/i/unreleasedConnectionsX"));
+    }
+
+    @Test
+    void liveServicesIgnoresPublicationKeys() {
+        // Ответ инстанса не создаёт сервис: узел регистрации в снимке виден и без него.
+        var keys = java.util.List.of(
+                "/config/services/service-a/groups/g1/instances/i1/unreleasedConnections");
         assertEquals(java.util.Set.of(), InstanceKey.liveServices(ROOT, keys));
     }
 }

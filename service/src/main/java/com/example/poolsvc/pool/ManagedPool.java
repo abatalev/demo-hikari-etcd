@@ -56,6 +56,60 @@ public class ManagedPool implements DataSource, AutoCloseable {
     private final AtomicInteger resizeCount = new AtomicInteger();
     private final AtomicInteger recreateCount = new AtomicInteger();
 
+    /**
+     * Поколение пула, которое сейчас освобождает соединения (дренируется перед закрытием).
+     *
+     * <p>Ссылка {@link #dataSource} на это поколение уже не указывает — иначе наблюдение врало бы:
+     * соединения ещё открыты в базе, а пул уже «исчез». Пока здесь не null, наблюдение обязано
+     * учитывать его соединения, иначе инстанс рапортует об освобождении, которого не было.
+     */
+    private final AtomicReference<Draining> draining = new AtomicReference<>();
+
+    /** Монитор смены конфигурации: публикация долга ждёт его, а не крутит таймер вслепую. */
+    private final java.util.concurrent.locks.ReentrantLock stateLock =
+            new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition appliedChanged = stateLock.newCondition();
+    private long appliedVersion;
+
+    /** Освобождаемое поколение пула: снимок MBean'а и его номер. */
+    private record Draining(HikariPoolMXBean pool, int generation) {}
+
+    /** Событие смены конфигурации: изменилось то, что видно снаружи (размер, пул, дренаж). */
+    private void publishStateChange() {
+        stateLock.lock();
+        try {
+            appliedVersion++;
+            appliedChanged.signalAll();
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+    /**
+     * Ждёт смены конфигурации начиная с наблюдённой версии.
+     *
+     * @param since версия, после которой ждём; 0 — ждём следующего изменения
+     * @param timeoutMs сколько ждать, если изменений не будет
+     * @return текущая версия
+     */
+    public long awaitAppliedChange(long since, long timeoutMs) throws InterruptedException {
+        stateLock.lock();
+        try {
+            if (appliedVersion != since) {
+                return appliedVersion;
+            }
+            appliedChanged.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return appliedVersion;
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+    /** Версия наблюдённого состояния; меняется при каждом применении конфигурации. */
+    public long appliedVersion() {
+        return appliedVersion;
+    }
+
     public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
             boolean eagerFillOnResize, Duration drainTimeout) {
         this.initializationFailTimeoutMs = initializationFailTimeoutMs == null ? -1L : initializationFailTimeoutMs;
@@ -77,7 +131,16 @@ public class ManagedPool implements DataSource, AutoCloseable {
      *
      * @return что именно произошло: пул создан, пересоздан, ресайзнут, закрыт или конфиг не изменился
      */
-    public synchronized ApplyResult apply(HikariSettings desired, String reason) {
+    public ApplyResult apply(HikariSettings desired, String reason) {
+        try {
+            return applyInternal(desired, reason);
+        } finally {
+            // Сигнал наружу: размер пула, поколение или долг изменились — публикация должна узнать.
+            publishStateChange();
+        }
+    }
+
+    private synchronized ApplyResult applyInternal(HikariSettings desired, String reason) {
         HikariSettings target;
         List<String> warnings;
         try {
@@ -140,11 +203,63 @@ public class ManagedPool implements DataSource, AutoCloseable {
         return new ApplyResult(Outcome.RESIZED, changes, target);
     }
 
+    /**
+     * Неосвобождённое сжатие: сколько соединений держим сверх текущего потолка.
+     *
+     * <p>Чистая функция — её держит и наблюдение, и публикация в etcd, чтобы обе величины
+     * считались одинаково. Пока конфигурации нет, потолок нулевой и удерживаемое считается
+     * неосвобождённым целиком.
+     *
+     * <p>Результат неотрицателен по построению, и ошибка оценки односторонняя: завышенное
+     * значение лишь придерживает рост флота, поэтому потолок бюджета защищается даже при
+     * неточном отчёте инстанса.
+     *
+     * @param ceiling текущий размер пула инстанса (0 — конфигурации нет)
+     * @param held открытые соединения обоих поколений (текущего и освобождаемого)
+     */
+    public static int unreleasedConnections(int ceiling, int held) {
+        return Math.max(0, held - ceiling);
+    }
+
+    /**
+     * Вытесняет idle-соединения, оказавшиеся сверх текущего потолка.
+     *
+     * <p>Нужно для хвоста сжатия. Соединение, создание которого было начато до сжатия, может
+     * появиться в пуле уже после того, как инстанс отрапортовал об освобождении места: счётчик
+     * HikariCP растёт в момент завершения создания, и отменить уже начатое нельзя. Само по себе
+     * лишнее соединение не опасно — следующая публикация снова увидит неосвобождённое сжатие и
+     * провижёр придержит рост, — но без вытеснения оно живёт, пока его не заберёт очередь
+     * ожидающих, а её может не быть: тогда пул держит соединений больше потолка и флот теряет
+     * место навсегда.
+     *
+     * @return {@code true}, если вытеснение выполнялось
+     */
+    public boolean evictAboveCeiling() {
+        HikariDataSource ds = dataSource.get();
+        if (ds == null || runtime().unreleasedConnections() <= 0) {
+            return false;
+        }
+        try {
+            ds.getHikariPoolMXBean().softEvictConnections();
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("вытеснение сверх потолка не удалось: {}", e.toString());
+            return false;
+        }
+    }
+
     /** Честное закрытие пула (целевой максимум 0): дренаж активных, потом close. */
     private ApplyResult closePool(HikariSettings target, HikariSettings current, String reason) {
         HikariDataSource ds = dataSource.getAndSet(null);
         if (ds != null) {
-            closeQuietly(ds);
+            // Поколение уходит в дренаж ДО закрытия: пока идёт дренаж, наблюдение обязано видеть
+            // его соединения, иначе инстанс рапортует об освобождении, которого не было.
+            beginDrain(ds, generation.get());
+            try {
+                closeQuietly(ds);
+            } finally {
+                endDrain();
+            }
             log.info("[{}] пул '{}' закрыт: размер {} -> 0, активные соединения дренированы",
                     reason, target.poolName(), current.maximumPoolSize());
         }
@@ -153,6 +268,18 @@ public class ManagedPool implements DataSource, AutoCloseable {
         lastChangeAt.set(System.currentTimeMillis());
         return new ApplyResult(Outcome.CLOSED,
                 List.of("maximumPoolSize: " + current.maximumPoolSize() + " -> 0"), target);
+    }
+
+    /** Поколение пула переходит в дренаж: его соединения ещё открыты и должны быть видны. */
+    private void beginDrain(HikariDataSource ds, int gen) {
+        if (ds == null || ds.isClosed()) {
+            return;
+        }
+        draining.set(new Draining(ds.getHikariPoolMXBean(), gen));
+    }
+
+    private void endDrain() {
+        draining.set(null);
     }
 
     /** Порядок важен: при уменьшении сначала minimumIdle, иначе получим minIdle > max. */
@@ -279,10 +406,18 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
         dataSource.set(fresh);
         applied.set(settings);
+        int previousGeneration = generation.get();
         generation.incrementAndGet();
         if (previous != null) {
             recreateCount.incrementAndGet();
-            closeQuietly(previous);
+            // Старое поколение дренируется уже после подмены ссылки: его соединения ещё открыты
+            // и обязаны попадать в наблюдение вместе с новыми.
+            beginDrain(previous, previousGeneration);
+            try {
+                closeQuietly(previous);
+            } finally {
+                endDrain();
+            }
         }
         createdAt.set(System.currentTimeMillis());
         lastChangeAt.set(System.currentTimeMillis());
@@ -344,16 +479,40 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     public Runtime runtime() {
         HikariDataSource ds = dataSource.get();
+        Draining d = draining.get();
+        // Дренируемое поколение читаем первым и только пока ссылка на него жива: после close()
+        // MBean отдаёт нули, и такие нули не должны выглядеть как «соединений нет».
+        int drainingTotal = 0;
+        int drainingActive = 0;
+        int drainingGeneration = 0;
+        if (d != null) {
+            try {
+                drainingTotal = d.pool().getTotalConnections();
+                drainingActive = d.pool().getActiveConnections();
+                drainingGeneration = d.generation();
+            } catch (RuntimeException e) {
+                // MBean закрытого пула может отказать — это не повод врать наблюдению о нуле.
+                drainingTotal = 0;
+                drainingActive = 0;
+                drainingGeneration = d.generation();
+            }
+        }
+
         if (ds == null) {
-            // Пула нет (ещё не создан или закрыт): честный срез «закрыт, размер 0».
+            // Пула нет (ещё не создан или закрыт), но освобождается он или нет — показываем правду.
             HikariSettings s = applied.get();
+            int held = drainingTotal;
+            int ceiling = s == null ? 0 : s.maximumPoolSize();
             return new Runtime(
                     s == null ? "нет пула" : s.poolName(),
                     generation.get(),
                     true,
-                    0, 0, 0, 0,
-                    s == null ? 0 : s.maximumPoolSize(),
+                    held, drainingActive, 0, 0,
+                    ceiling,
                     s == null ? 0 : s.minimumIdle(),
+                    unreleasedConnections(ceiling, held),
+                    drainingGeneration,
+                    drainingTotal,
                     createdAt.get(),
                     lastChangeAt.get(),
                     lastReason.get(),
@@ -361,16 +520,24 @@ public class ManagedPool implements DataSource, AutoCloseable {
                     recreateCount.get());
         }
         HikariPoolMXBean pool = ds.getHikariPoolMXBean();
+        int total = pool.getTotalConnections() + drainingTotal;
+        int active = pool.getActiveConnections() + drainingActive;
+        int ceiling = ds.getHikariConfigMXBean().getMaximumPoolSize();
         return new Runtime(
                 ds.getPoolName(),
                 generation.get(),
                 ds.isClosed(),
-                pool.getTotalConnections(),
-                pool.getActiveConnections(),
+                total,
+                active,
                 pool.getIdleConnections(),
                 pool.getThreadsAwaitingConnection(),
-                ds.getHikariConfigMXBean().getMaximumPoolSize(),
+                ceiling,
                 ds.getHikariConfigMXBean().getMinimumIdle(),
+                // Долг: сколько соединений держим сверх потолка. Из неотрицательного и честного —
+                // инстанс, завышающий своё значение, лишь придерживает рост флота.
+                unreleasedConnections(ceiling, total),
+                drainingGeneration,
+                drainingTotal,
                 createdAt.get(),
                 lastChangeAt.get(),
                 lastReason.get(),
@@ -382,7 +549,13 @@ public class ManagedPool implements DataSource, AutoCloseable {
     public void close() {
         HikariDataSource ds = dataSource.getAndSet(null);
         if (ds != null) {
-            closeQuietly(ds);
+            beginDrain(ds, generation.get());
+            try {
+                closeQuietly(ds);
+            } finally {
+                endDrain();
+                publishStateChange();
+            }
         }
     }
 
@@ -474,12 +647,19 @@ public class ManagedPool implements DataSource, AutoCloseable {
             String poolName,
             int generation,
             boolean closed,
+            /** открытые соединения обоих поколений: текущего и освобождаемого */
             int total,
             int active,
             int idle,
             int threadsAwaitingConnection,
             int maximumPoolSize,
             int minimumIdle,
+            /** неосвобождённое сжатие: сколько соединений держим сверх потолка */
+            int unreleasedConnections,
+            /** номер освобождаемого поколения; 0 — освобождаемого пула нет */
+            int drainingGeneration,
+            /** соединения освобождаемого поколения; 0 — освобождаемого пула нет */
+            int drainingTotal,
             long createdAtEpochMs,
             long lastChangeEpochMs,
             String lastChangeReason,

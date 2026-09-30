@@ -30,8 +30,16 @@ public final class InstanceKey {
 
     public static final String INACTIVE_MAX_CONNECTIONS = "inactiveMaxConnections";
 
+    /**
+     * Ключ публикации неосвобождённого сжатия под узлом регистрации.
+     *
+     * <p>Вне префикса {@code hikari/}: инстанс не считает его настройкой пула, и он не попадает ни в
+     * снимок конфигурации, ни в watch инстанса.
+     */
+    public static final String UNRELEASED_CONNECTIONS = "unreleasedConnections";
+
     /** Результат разбора полного ключа. */
-    public sealed interface Parsed permits Node, Config, ServiceSetting, Other {
+    public sealed interface Parsed permits Node, Config, Publication, ServiceSetting, Other {
     }
 
     /** Ключ — сам узел регистрации {@code .../instances/{instance}/}. */
@@ -40,6 +48,18 @@ public final class InstanceKey {
 
     /** Ключ — ключ конфигурации внутри {@code .../instances/{instance}/hikari/}. */
     public record Config(String service, String group, String instance) implements Parsed {
+    }
+
+    /**
+     * Ключ — публикация неосвобождённого сжатия
+     * {@code .../instances/{instance}/unreleasedConnections}.
+     *
+     * <p>Инстанс пишет сюда, сколько соединений он держит сверх своего потолка. Ключ лежит рядом
+     * с узлом регистрации и вне префикса {@code hikari/}: это ответ инстанса, а не настройка пула,
+     * поэтому в снимок конфигурации инстанса он не попадает и очисткой осиротевших префиксов не
+     * затрагивается. Живёт на аренде узла — исчезает вместе с ним, отдельной уборки не требует.
+     */
+    public record Publication(String service, String group, String instance) implements Parsed {
     }
 
     /**
@@ -75,7 +95,8 @@ public final class InstanceKey {
      * Разбирает полный ключ относительно заданного корня.
      *
      * @param fullKey полный ключ, как его отдаёт etcd
-     * @return {@link Node}, {@link Config}, {@link ServiceSetting} или {@link Other}
+     * @return {@link Node}, {@link Config}, {@link Publication}, {@link ServiceSetting}
+     *     или {@link Other}
      */
     public static Parsed parse(String root, String fullKey) {
         String prefix = normalizedRoot(root) + "/" + SERVICES + "/";
@@ -110,6 +131,9 @@ public final class InstanceKey {
         if (HIKARI.equals(parts[5])) {
             return new Config(service, group, instance);
         }
+        if (parts.length == 6 && UNRELEASED_CONNECTIONS.equals(parts[5])) {
+            return new Publication(service, group, instance);
+        }
         return new Other();
     }
 
@@ -136,6 +160,12 @@ public final class InstanceKey {
     /** Префикс ключей конфигурации инстанса {@code .../instances/{instance}/hikari/}. */
     public static String hikariPrefix(String root, String service, String group, String instance) {
         return nodeKey(root, service, group, instance) + HIKARI + "/";
+    }
+
+    /** Полный ключ публикации неосвобождённого сжатия {@code .../instances/{i}/unreleasedConnections}. */
+    public static String unreleasedConnectionsKey(String root, String service, String group,
+            String instance) {
+        return nodeKey(root, service, group, instance) + UNRELEASED_CONNECTIONS;
     }
 
     /**

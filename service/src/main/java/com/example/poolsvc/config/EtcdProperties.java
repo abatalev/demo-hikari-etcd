@@ -31,6 +31,21 @@ public class EtcdProperties {
     /** TTL аренды узла регистрации инстанса; keepalive идёт каждые TTL/3 (дефолт 15с → 5с). */
     private Duration registrationTtl = Duration.ofSeconds(15);
 
+    /**
+     * Квант промежуточной публикации неосвобождённого сжатия, в соединениях.
+     *
+     * <p>0 (по умолчанию) — не фильтровать: публикуется каждое изменение величины. Ненулевое
+     * значение пропускает промежуточные значения, не дотягивающие до кванта; на терминальный
+     * ноль фильтр не действует, иначе место освобождения не дошло бы до провижёра.
+     */
+    private int publishQuantum = 0;
+
+    /** Период опроса долга, пока он ненулевой (освобождение идёт постепенно). */
+    private Duration publishPollInterval = Duration.ofSeconds(1);
+
+    /** Сколько ждать смены конфигурации, пока долг равен нулю (страховка от пропуска сигнала). */
+    private Duration publishIdleInterval = Duration.ofSeconds(5);
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -85,6 +100,30 @@ public class EtcdProperties {
 
     public void setCallTimeout(Duration callTimeout) {
         this.callTimeout = callTimeout;
+    }
+
+    public int getPublishQuantum() {
+        return publishQuantum;
+    }
+
+    public void setPublishQuantum(int publishQuantum) {
+        this.publishQuantum = publishQuantum;
+    }
+
+    public Duration getPublishPollInterval() {
+        return publishPollInterval;
+    }
+
+    public void setPublishPollInterval(Duration publishPollInterval) {
+        this.publishPollInterval = publishPollInterval;
+    }
+
+    public Duration getPublishIdleInterval() {
+        return publishIdleInterval;
+    }
+
+    public void setPublishIdleInterval(Duration publishIdleInterval) {
+        this.publishIdleInterval = publishIdleInterval;
     }
 
     public Duration getRetryInitialBackoff() {

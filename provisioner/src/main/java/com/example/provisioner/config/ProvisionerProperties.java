@@ -54,6 +54,15 @@ public class ProvisionerProperties {
     /** Стартовое значение connectionTimeoutMs для вновь зарегистрированных инстансов. */
     private int connectionTimeoutMs = 3000;
 
+    /**
+     * Порог предупреждения о зависшем неосвобождённом сжатии, мс.
+     *
+     * <p>Пока инстанс держит соединения сверх потолка, место не перераспределяется: флот работает
+     * меньше бюджета, и это безопаснее превышения. Чтобы «меньше бюджета» не выглядело как тишина,
+     * дольше порога величина попадает в журнал с числами. 0 — не предупреждать.
+     */
+    private long stuckDebtWarnMs = Duration.ofSeconds(30).toMillis();
+
     private Duration callTimeout = Duration.ofSeconds(5);
     private Duration retryInitialBackoff = Duration.ofSeconds(1);
     private Duration retryMaxBackoff = Duration.ofSeconds(30);
@@ -109,6 +118,14 @@ public class ProvisionerProperties {
 
     public int getMaxShare() {
         return maxShare;
+    }
+
+    public long getStuckDebtWarnMs() {
+        return stuckDebtWarnMs;
+    }
+
+    public void setStuckDebtWarnMs(long stuckDebtWarnMs) {
+        this.stuckDebtWarnMs = stuckDebtWarnMs;
     }
 
     public void setMaxShare(int maxShare) {

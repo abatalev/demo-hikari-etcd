@@ -22,6 +22,9 @@
     "threadsAwaitingConnection": 0,
     "maximumPoolSize": 25,
     "minimumIdle": 25,
+    "unreleasedConnections": 0,
+    "drainingGeneration": 0,
+    "drainingTotal": 0,
     "createdAtEpochMs": 1790588803069,
     "lastChangeEpochMs": 1790588803885,
     "lastChangeReason": "etcd-снапшот@5",
@@ -63,11 +66,14 @@
 |---|---|
 | `generation` | сколько раз пул создавался за жизнь процесса. `1` = ни разу не пересоздавался, `2` = было пересоздание из-за смены `jdbcUrl`/кредов |
 | `closed` | `false` у живого пула; `true`, когда пула нет (старт до первого конфига, инстанс без доли, холодный флот `R=0`) — `ManagedPool.close()` обнуляет ссылку, дальше любой `getConnection()` бросит `IllegalStateException` |
-| `total` | физически открытых соединений. **Не равно `maximumPoolSize`**: растёт до него по мере надобности, если `eager-fill-on-resize=false` |
+| `total` | физически открытых соединений обоих поколений (текущего и освобождаемого). **Не равно `maximumPoolSize`**: растёт до него по мере надобности, если `eager-fill-on-resize=false` |
 | `active` | сейчас занято запросами. При `total` = 10 и `active` = 4 четыре потока нагрузчика держат коннекты в `pg_sleep` |
 | `idle` | свободные соединения. `total = active + idle` |
 | `threadsAwaitingConnection` | сколько потоков стоит в очереди за коннектом. Ненулевое значение — единственный признак перегруза; при `connectionTimeoutMs` эти потоки начнут падать с timeout |
 | `maximumPoolSize`, `minimumIdle` | значения, реально применённые в пуле (через MBean), а не то, что лежит в etcd |
+| `unreleasedConnections` | сколько соединений пул держит **сверх `maximumPoolSize`**: `max(0, total − maximumPoolSize)`. Ненулевое значение — идёт дренаж после сжатия (или снятия конфигурации). Это ровно то число, которое инстанс публикует в etcd как `unreleasedConnections` и по которому провижёр решает, сколько места можно отдать растущим. Ноль при `total` **меньше** `maximumPoolSize` — это не долг: пул просто не добит, место под него есть |
+| `drainingGeneration` | поколение пула, ушедшего в дренаж; `0`, если пересоздания не было. Пока оно ненулевое, `total` включает соединения и старого поколения — `total` не падает в ноль в момент `RECREATED` |
+| `drainingTotal` | соединения освобождаемого поколения, всё ещё открытые. Ненулевое при `drainingGeneration > 0` означает, что старый пул ещё не допранажирован: запросы в полёте на нём ещё есть |
 | `lastChangeReason` | откуда пришло последнее изменение: `startup`, `etcd-снапшот@5`, `etcd@7 [maximumPoolSize=put]`. Главное поле для разбора «кто это сделал» |
 | `resizeCount`, `recreationCount` | счётчики apply'ев: ресайз против полного пересоздания |
 

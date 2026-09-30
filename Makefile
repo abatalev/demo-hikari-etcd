@@ -42,6 +42,12 @@ tuples_by_G = $(foreach t,$(TUPLES),$(if $(filter $(G),$(call tuple_group,$(t)))
 # кортежи по сервису, заданному аргументом (для циклов по переменной-аргументу)
 tuples_by_serv = $(foreach t,$(TUPLES),$(if $(filter $(1),$(call tuple_service,$(t))),$(t)))
 
+# Список application_name пулов стенда в виде SQL IN ('a','b'): application_name = POOL_NAME,
+# и посторонние сессии (psql, нагрузчик) в сумму флота попадать не должны.
+pool_names_sql = $(subst $(space),$(comma),$(foreach t,$(TUPLES),'$(call tuple_instance,$(t))'))
+comma := ,
+space := $(empty) $(empty)
+
 # Имена сервисов: из S=... либо все сервисы .env по порядку первого появления. Кортежи в shell
 # кавычим: иначе `|` внутри кортежа разрежется в пайп и for развалится.
 service_names = $(if $(S),$(S),$(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++'))
@@ -233,6 +239,16 @@ psql: ## зайти в postgres
 sessions: ## сессии postgres по application_name (сколько коннектов держит каждый пул)
 	@$(COMPOSE) exec -T postgres psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
 		-c "SELECT * FROM pool_sessions ORDER BY application_name"
+
+.PHONY: fleet-sessions
+fleet-sessions: ## держит ли флот бюджет: фактические сессии в БД + потолки и публикации из etcd
+	@printf "== фактически держит флот (postgres) ==\n"; \
+		$(COMPOSE) exec -T postgres psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
+			-c "SELECT sum(sessions) AS held_by_fleet, count(*) AS pools FROM pool_sessions \
+				WHERE application_name IN ($(call pool_names_sql))"; \
+	printf "== потолки и публикации (etcd) ==\n"; \
+		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+			| python3 scripts/fleet-sessions.py "$(ETCD_ROOT)/"
 
 .PHONY: service-restart
 service-restart: ## перезапустить инстанс: make service-restart P=service-a-group-1-1

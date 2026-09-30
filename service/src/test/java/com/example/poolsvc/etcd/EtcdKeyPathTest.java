@@ -80,4 +80,40 @@ class EtcdKeyPathTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("instance");
     }
+
+    @Test
+    void unreleasedConnectionsKeyLivesBesideNodeOutsideHikari() {
+        // Публикация — ответ инстанса, а не настройка пула: внутри hikari/ ей не место, оттуда её
+        // забрала бы уборка префикса при снятии доли.
+        String publication = EtcdKeyPath.unreleasedConnectionsPath("/config", "service-a", "group-1",
+                "service-a-group-1-1");
+
+        assertThat(publication).isEqualTo(
+                "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/unreleasedConnections");
+        assertThat(publication).startsWith(EtcdKeyPath.nodePath("/config", "service-a", "group-1",
+                "service-a-group-1-1"));
+        assertThat(publication).doesNotContain("hikari/");
+    }
+
+    @Test
+    void unreleasedConnectionsKeyTrimsTrailingSlashOfRoot() {
+        assertThat(EtcdKeyPath.unreleasedConnectionsPath("/config/", "s", "g", "i"))
+                .isEqualTo("/config/services/s/groups/g/instances/i/unreleasedConnections");
+    }
+
+    @Test
+    void unreleasedConnectionsKeyValidatesSegments() {
+        assertThatThrownBy(
+                () -> EtcdKeyPath.unreleasedConnectionsPath("/config", "service-a", "  ", "i"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("group");
+    }
+
+    @Test
+    void unreleasedConnectionsIsNotAConfigKey() {
+        // Путь публикации не должен собираться грамматикой конфигурации: иначе сервис принял бы
+        // ответ провизёру за настройку пула.
+        assertThat(EtcdKeyPath.build("/config", "s", "g", "i"))
+                .doesNotContain(EtcdKeyPath.UNRELEASED_CONNECTIONS);
+    }
 }
