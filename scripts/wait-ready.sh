@@ -14,7 +14,8 @@ LB_B_PORT="$3"
 WAIT_S="${4:-120}"
 PROM_PORT="${5:-9090}"
 GRAFANA_PORT="${6:-3000}"
-EXPORTER_PORT="${7:-9187}"
+EXPORTER_PORT_A="${7:-9187}"
+EXPORTER_PORT_B="${8:-9188}"
 
 # Окно ожидания наблюдения: отдельное и короткое, чтобы стенд не ждал его впустую.
 OBS_WAIT_S="${OBS_WAIT_S:-60}"
@@ -63,13 +64,16 @@ while :; do
         fi
     }
     check_obs "http://localhost:${PROM_PORT}/-/ready" "сборщик метрик@${PROM_PORT}"
-    check_obs "http://localhost:${EXPORTER_PORT}/metrics" "сборщик метрик базы@${EXPORTER_PORT}"
+    # По сборщику на базу: сессии пулов видны в сборщике своей базы, и молчащий сборщик
+    # второй базы означал бы, что на панели половина флота просто отсутствует.
+    check_obs "http://localhost:${EXPORTER_PORT_A}/metrics" "сборщик метрик базы a@${EXPORTER_PORT_A}"
+    check_obs "http://localhost:${EXPORTER_PORT_B}/metrics" "сборщик метрик базы b@${EXPORTER_PORT_B}"
     check_obs "http://localhost:${GRAFANA_PORT}/api/health" "витрина метрик@${GRAFANA_PORT}"
     if [ ${#obs_left[@]} -eq 0 ] || [ "$(date +%s)" -ge "$obs_deadline" ]; then
         if [ ${#obs_left[@]} -gt 0 ]; then
             echo "  НЕ ГОТОВО (стенд работает): ${obs_left[*]}" >&2
-            echo "  состояние контейнеров: docker compose ps prometheus postgres-exporter grafana" >&2
-            echo "  логи: docker compose logs prometheus postgres-exporter grafana" >&2
+            echo "  состояние контейнеров: docker compose ps prometheus postgres-exporter-a postgres-exporter-b grafana" >&2
+            echo "  логи: docker compose logs prometheus postgres-exporter-a postgres-exporter-b grafana" >&2
         fi
         break
     fi

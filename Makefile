@@ -25,10 +25,16 @@ LB_A_PORT ?= 8080
 LB_B_PORT ?= 8081
 PROM_PORT ?= 9090
 GRAFANA_PORT ?= 3000
-EXPORTER_PORT ?= 9187
+EXPORTER_PORT_A ?= 9187
+EXPORTER_PORT_B ?= 9188
 WAIT_S ?= 120
-TARGET ?= http://lb-a
-STATUS_TARGET ?= http://$(call tuple_instance,$(word 1,$(TUPLES))):8080
+# Нагрузка адресуется сервисом, но отдельной переменной: S= обязателен в командах etcd (там
+# сервис выбирает, что править, и молчаливый выбор опасен), а дефолтный S= убрал бы эту проверку.
+LOAD_S ?= $(call tuple_service,$(word 1,$(TUPLES)))
+LOAD_LB ?= $(if $(filter service-a,$(LOAD_S)),lb-a,lb-b)
+LOAD_INSTANCE ?= $(call tuple_instance,$(word 1,$(foreach t,$(TUPLES),$(if $(filter $(LOAD_S),$(call tuple_service,$(t))),$(t)))))
+TARGET ?= http://$(LOAD_LB)
+STATUS_TARGET ?= http://$(LOAD_INSTANCE):8080
 
 # --- список целей сбора метрик ---
 # Выводится из ETCD_INSTANCES: имя инстанса одновременно имя сервиса в compose, поэтому третья копия
@@ -61,6 +67,32 @@ space := $(empty) $(empty)
 # Имена сервисов: из S=... либо все сервисы .env по порядку первого появления. Кортежи в shell
 # кавычим: иначе `|` внутри кортежа разрежется в пайп и for развалится.
 service_names = $(if $(S),$(S),$(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++'))
+all_service_names = $(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++')
+
+# --- адресация базы данных по сервису ---
+# База на сервис, и имя контейнера выводится из имени сервиса: service-a -> postgres-a. Третьей
+# копии списка не появляется, как и с инстансами (выводится из ETCD_INSTANCES).
+service_suffix = $(patsubst service-%,%,$(1))
+db_container   = postgres-$(call service_suffix,$(1))
+exporter_container = postgres-exporter-$(call service_suffix,$(1))
+loadgen_container  = loadgen-$(call service_suffix,$(1))
+
+# Команды, работающие с базой, требуют S=...: баз несколько, и угадывать нечего. Молча смотренная
+# не та база опаснее падения — сводка «флот 100» из двух баз читалась бы как «флот 200 в одной».
+# Это отдельная цель-guard, а не $(if) внутри рецепта: пустой $(if) в shell даёт синтаксическую
+# ошибку вместо внятного отказа.
+.PHONY: require-S
+require-S:
+	@if [ -z "$(S)" ]; then \
+		echo "укажи S=имя сервиса (база на сервис): $(call all_service_names)"; exit 1; \
+	fi; \
+	if ! echo " $(call all_service_names) " | grep -q " $(S) "; then \
+		echo "неизвестный сервис S=$(S) (в стенде: $(call all_service_names))"; exit 1; \
+	fi
+
+# Кортежи выбранного сервиса — чтобы сводка по базе считала только его пулы, а не все сразу.
+tuples_of_S = $(call tuples_by_serv,$(S))
+pool_names_of_S = $(subst $(space),$(comma),$(foreach t,$(call tuples_of_S),'$(call tuple_instance,$(t))'))
 
 # Проверка аргумента SIZE до записи в etcd: не число или не положительное — отказ.
 require_positive_int = $(if $(filter-out 0,$(shell test $(2) -gt 0 2>/dev/null && echo ok)),,\
@@ -98,7 +130,7 @@ up: prometheus-targets ## поднять весь стенд и дождатьс
 	$(COMPOSE) up -d --build
 	@echo "--- ждём готовности всех инстансов и балансировщиков (до $(WAIT_S)с) ---"
 	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
-		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT)
+		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT_A) $(EXPORTER_PORT_B)
 	@$(MAKE) --no-print-directory pool
 	# Состояние целей — только сообщение: недоступность наблюдения не должна ронять make up
 	-@$(MAKE) --no-print-directory targets
@@ -120,15 +152,17 @@ logs: ## логи инстанса: make logs P=service-a-group-1-1
 	$(COMPOSE) logs -f --tail=200 $(P)
 
 .PHONY: load-logs
-load-logs: ## логи нагрузчика
-	$(COMPOSE) logs -f --tail=100 loadgen
+load-logs: ## логи нагрузчика сервиса: make load-logs LOAD_S=service-b
+	$(COMPOSE) logs -f --tail=100 $(call loadgen_container,$(LOAD_S))
 
 .PHONY: stress
-stress: ## разовый прогон нагрузки через lb-a (DURATION_S по умолчанию 20с): WORKERS=32 WORK_MS=200 make stress
+stress: ## разовый прогон нагрузки на сервис (DURATION_S по умолчанию 20с): LOAD_S=service-b WORKERS=32 WORK_MS=200 make stress
+	@echo "нагрузка на $(LOAD_S) через $(LOAD_LB), инстанс для сводки: $(LOAD_INSTANCE)"
 	$(COMPOSE) run --rm --no-deps \
 		-e TARGET=$(TARGET) -e STATUS_TARGET=$(STATUS_TARGET) \
 		-e WORKERS=$(WORKERS) -e WORK_MS=$(WORK_MS) -e REPORT_MS=$(REPORT_MS) \
-		-e DURATION_S=$(if $(filter-out 0,$(DURATION_S)),$(DURATION_S),20) loadgen
+		-e DURATION_S=$(if $(filter-out 0,$(DURATION_S)),$(DURATION_S),20) \
+		$(call loadgen_container,$(LOAD_S))
 
 # --- ручные правки конфигурации в etcd ---
 # Адресация: I=имя инстанса (один), S=имя сервиса, G=имя группы.
@@ -241,27 +275,30 @@ pool: ## сводка по всем инстансам; make pool I=имя — �
 	@$(if $(filter command line,$(origin I)),curl -fsS http://localhost:$(call tuple_port,$(call tuple_by_I,$(I)))/api/pool | python3 -m json.tool,python3 scripts/pool-all.py '$(TUPLES)')
 
 .PHONY: work
-work: ## один запрос через lb-a
-	@curl -fsS "http://localhost:$(LB_A_PORT)/api/work?ms=100" | python3 -m json.tool
+work: ## один запрос через балансировщик сервиса: make work LOAD_S=service-b
+	@curl -fsS "http://localhost:$(if $(filter service-a,$(LOAD_S)),$(LB_A_PORT),$(LB_B_PORT))/api/work?ms=100" \
+		| python3 -m json.tool
 
 .PHONY: psql
-psql: ## зайти в postgres
-	@$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo}
+psql: require-S ## зайти в базу сервиса: make psql S=service-a
+	@echo "база: $(call db_container,$(S)) (сервис $(S))"
+	@$(COMPOSE) exec $(call db_container,$(S)) psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo}
 
 .PHONY: sessions
-sessions: ## сессии postgres по application_name (сколько коннектов держит каждый пул)
-	@$(COMPOSE) exec -T postgres psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
+sessions: require-S ## сессии базы сервиса по application_name: make sessions S=service-a
+	@echo "база: $(call db_container,$(S)) (сервис $(S))"
+	@$(COMPOSE) exec -T $(call db_container,$(S)) psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
 		-c "SELECT * FROM pool_sessions ORDER BY application_name"
 
 .PHONY: fleet-sessions
-fleet-sessions: ## держит ли флот бюджет: фактические сессии в БД + потолки и публикации из etcd
-	@printf "== фактически держит флот (postgres) ==\n"; \
-		$(COMPOSE) exec -T postgres psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
-			-c "SELECT sum(sessions) AS held_by_fleet, count(*) AS pools FROM pool_sessions \
-				WHERE application_name IN ($(call pool_names_sql))"; \
-	printf "== потолки и публикации (etcd) ==\n"; \
-		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
-			| python3 scripts/fleet-sessions.py "$(ETCD_ROOT)/"
+fleet-sessions: require-S ## держит ли флот бюджет: make fleet-sessions S=service-a — сводка по его базе
+	@printf "== фактически держит флот (база %s, сервис %s) ==\n" "$(call db_container,$(S))" "$(S)"
+	@$(COMPOSE) exec -T $(call db_container,$(S)) psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
+		-c "SELECT sum(sessions) AS held_by_fleet, count(*) AS pools FROM pool_sessions \
+			WHERE application_name IN ($(call pool_names_of_S))"
+	@printf "== потолки и публикации (etcd) ==\n"
+	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+		| python3 scripts/fleet-sessions.py "$(ETCD_ROOT)/" "$(S)"
 
 .PHONY: service-restart
 service-restart: ## перезапустить инстанс: make service-restart P=service-a-group-1-1

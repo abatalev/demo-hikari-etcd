@@ -1,5 +1,10 @@
 name: hikari-etcd-stand
 
+# Схема стенда: база на сервис, балансировщик и точка нагрузки на сервис, сборщик метрик на базу.
+# Восемь инстансов (по четыре на сервис) делят один etcd с бюджетами, но у каждого сервиса своя
+# база, свой потолок соединений и своя изоляция при отказе. Механизму разделение безразлично:
+# бюджет и доли живут в etcd, адрес базы приходит локально в DB_URL.
+
 # Образ с etcdctl для ручных правок конфигурации из Makefile (make config / set-size и т.п.).
 x-etcdctl: &etcdctl
   image: hikari-etcd/etcdctl:local
@@ -8,18 +13,15 @@ x-etcdctl: &etcdctl
     ETCDCTL_ENDPOINTS: http://etcd:2379
     ETCDCTL_API: "3"
 
-# Общий блок инстанса сервиса. Восемь копий отличаются SERVICE_NAME/ETCD_GROUP/ETCD_INSTANCE
-# (сегменты пути конфигурации), POOL_NAME (иначе pool_sessions склеит пулы) и портом хоста.
-# Канонический список инстансов с портами — ETCD_INSTANCES в .env (см. make instances).
-x-service: &service
+# Общая часть инстанса сервиса, одинаковая для обоих сервисов. Восемь копий отличаются
+# SERVICE_NAME/ETCD_GROUP/ETCD_INSTANCE (сегменты пути конфигурации), POOL_NAME (иначе
+# pool_sessions склеит пулы) и портом хоста. Канонический список инстансов с портами —
+# ETCD_INSTANCES в .env (см. make instances).
+x-service: &service-base
   image: hikari-etcd/service:local
   build: ./service
   mem_limit: 512m
-  depends_on:
-    postgres:
-      condition: service_healthy
   environment: &service-env
-    DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-demo}
     DB_USER: ${POSTGRES_USER:-app}
     DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
     # Размер пула задаётся только etcd: локальный дефолт максимума жёстко 0 (пула нет до
@@ -38,6 +40,27 @@ x-service: &service
     timeout: 3s
     start_period: 90s
     retries: 60
+
+# Часть инстанса, различающаяся по сервису: ровно два свойства — адрес базы и условие готовности,
+# по которому инстанс дожидается своей базы. Всё остальное общее. Разделение здесь, а не в восьми
+# блоках инстансов, гарантирует, что у инстанса не может оказаться база чужого сервиса.
+x-service-a: &service-a
+  <<: *service-base
+  depends_on:
+    postgres-a:
+      condition: service_healthy
+  environment: &service-a-env
+    <<: *service-env
+    DB_URL: jdbc:postgresql://postgres-a:5432/${POSTGRES_DB:-demo}
+
+x-service-b: &service-b
+  <<: *service-base
+  depends_on:
+    postgres-b:
+      condition: service_healthy
+  environment: &service-b-env
+    <<: *service-env
+    DB_URL: jdbc:postgresql://postgres-b:5432/${POSTGRES_DB:-demo}
 
 # Общий блок провизинера конфигурации (две реплики). Работает один на сервис: лидер выбирается
 # узлами {root}/provisioner/leader/{service}/, набор сервисов провизор выводит сам из узлов
@@ -67,32 +90,79 @@ x-provisioner: &provisioner
     start_period: 60s
     retries: 60
 
+# База на каждый сервис: своя база — своя фидельность микросервису, свой потолок соединений и
+# своя изоляция при отказе. Механизму база безразлична: адрес приходит локально из DB_URL, бюджет
+# и доли живут в etcd, поэтому разделение — свойство обвязки стенда, а не поведения механизма.
+#
+# Потолок 120 = бюджет активного флота 100 + запас 20. Число выведено из двух ограничений
+# сразу, и оба важны:
+#   запас МЕНЬШЕ доли (100/4 = 25) — тогда превышение сверх потолка отказывает база, а поломку
+#     порядка выдачи мест (она стоит одну долю) ловит сама база, а не только правило по метрике;
+#   запас БОЛЬШЕ того, что занимает стенд сам (7-9 соединений) — иначе psql оператора и сборщик
+#     метрик начинали бы конкурировать с флотом, и отказ служебной сессии выглядел бы как поломка
+#     механизма. 20 против 8-9 оставляет 11-12 мест.
+# 10 не годится (ложные тревоги), 50 делает потолок декоративным. Роль стенда — суперпользователь,
+# поэтому зарезервированные слоты не занимаются флотом: сборщик и psql проходят даже при отказе.
+x-postgres: &postgres
+  image: postgres:16
+  environment:
+    POSTGRES_DB: ${POSTGRES_DB:-demo}
+    POSTGRES_USER: ${POSTGRES_USER:-app}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+  command:
+    - postgres
+    - -c
+    - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
+    - -c
+    - log_min_duration_statement=500
+  volumes:
+    - ./db/init:/docker-entrypoint-initdb.d:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+
+x-exporter: &exporter
+  image: prometheuscommunity/postgres-exporter:v0.20.1
+  mem_limit: 256m
+  command:
+    - --collector.stat_activity
+    - --collector.stat_activity_autovacuum
+    - --web.listen-address=:9187
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
+    interval: 10s
+    timeout: 5s
+    start_period: 20s
+    retries: 20
+
+x-loadgen: &loadgen
+  build: ./loadgen
+  environment: &loadgen-env
+    WORKERS: ${WORKERS:-4}
+    WORK_MS: ${WORK_MS:-25}
+    THINK_MS: ${THINK_MS:-0}
+    REPORT_MS: ${REPORT_MS:-2000}
+    DURATION_S: ${DURATION_S:-0}
+  restart: unless-stopped
+
 services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-demo}
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-    command:
-      - postgres
-      - -c
-      # Бюджеты двух сервисов по умолчанию дают 200 соединений; плюс запас на psql и на сам стенд.
-      # Реальные лимиты БД в механизме не участвуют, но стенд должен выдерживать сумму бюджетов,
-      # иначе его нечем измерять.
-      - max_connections=300
-      - -c
-      - log_min_duration_statement=500
+  postgres-a:
+    <<: *postgres
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT_A:-5432}:5432"
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      - pg-data-a:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
+
+  postgres-b:
+    <<: *postgres
+    ports:
+      - "${POSTGRES_PORT_B:-5433}:5432"
+    volumes:
+      - pg-data-b:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
 
   etcd:
     image: quay.io/coreos/etcd:v3.6.15
@@ -136,9 +206,9 @@ services:
 
   # --- инстансы service-a (группы group-1, group-2) ---
   service-a-group-1-1:
-    <<: *service
+    <<: *service-a
     environment:
-      <<: *service-env
+      <<: *service-a-env
       SERVICE_NAME: service-a
       ETCD_GROUP: group-1
       ETCD_INSTANCE: service-a-group-1-1
@@ -147,9 +217,9 @@ services:
       - "18081:8080"
 
   service-a-group-1-2:
-    <<: *service
+    <<: *service-a
     environment:
-      <<: *service-env
+      <<: *service-a-env
       SERVICE_NAME: service-a
       ETCD_GROUP: group-1
       ETCD_INSTANCE: service-a-group-1-2
@@ -158,9 +228,9 @@ services:
       - "18082:8080"
 
   service-a-group-2-1:
-    <<: *service
+    <<: *service-a
     environment:
-      <<: *service-env
+      <<: *service-a-env
       SERVICE_NAME: service-a
       ETCD_GROUP: group-2
       ETCD_INSTANCE: service-a-group-2-1
@@ -169,9 +239,9 @@ services:
       - "18083:8080"
 
   service-a-group-2-2:
-    <<: *service
+    <<: *service-a
     environment:
-      <<: *service-env
+      <<: *service-a-env
       SERVICE_NAME: service-a
       ETCD_GROUP: group-2
       ETCD_INSTANCE: service-a-group-2-2
@@ -181,9 +251,9 @@ services:
 
   # --- инстансы service-b (группы group-1, group-2) ---
   service-b-group-1-1:
-    <<: *service
+    <<: *service-b
     environment:
-      <<: *service-env
+      <<: *service-b-env
       SERVICE_NAME: service-b
       ETCD_GROUP: group-1
       ETCD_INSTANCE: service-b-group-1-1
@@ -192,9 +262,9 @@ services:
       - "18085:8080"
 
   service-b-group-1-2:
-    <<: *service
+    <<: *service-b
     environment:
-      <<: *service-env
+      <<: *service-b-env
       SERVICE_NAME: service-b
       ETCD_GROUP: group-1
       ETCD_INSTANCE: service-b-group-1-2
@@ -203,9 +273,9 @@ services:
       - "18086:8080"
 
   service-b-group-2-1:
-    <<: *service
+    <<: *service-b
     environment:
-      <<: *service-env
+      <<: *service-b-env
       SERVICE_NAME: service-b
       ETCD_GROUP: group-2
       ETCD_INSTANCE: service-b-group-2-1
@@ -214,9 +284,9 @@ services:
       - "18087:8080"
 
   service-b-group-2-2:
-    <<: *service
+    <<: *service-b
     environment:
-      <<: *service-env
+      <<: *service-b-env
       SERVICE_NAME: service-b
       ETCD_GROUP: group-2
       ETCD_INSTANCE: service-b-group-2-2
@@ -279,21 +349,29 @@ services:
       timeout: 3s
       retries: 20
 
-  loadgen:
-    build: ./loadgen
+  # Нагрузка на каждую базу: своя точка на свой балансировщик. Две реплики вместо списка целей
+  # в одной — намеренно: у каждой своя гистограмма задержек и своя строка итога, и отчёты двух
+  # прогонов не смешивают две базы (LoadGen.java при этом не меняется).
+  loadgen-a:
+    <<: *loadgen
     depends_on:
       service-a-group-1-1:
         condition: service_healthy
     environment:
+      <<: *loadgen-env
       # TARGET — через балансировщик; STATUS_TARGET — стабильный инстанс для сводки пула
       TARGET: http://lb-a
       STATUS_TARGET: http://service-a-group-1-1:8080
-      WORKERS: ${WORKERS:-4}
-      WORK_MS: ${WORK_MS:-25}
-      THINK_MS: ${THINK_MS:-0}
-      REPORT_MS: ${REPORT_MS:-2000}
-      DURATION_S: ${DURATION_S:-0}
-    restart: unless-stopped
+
+  loadgen-b:
+    <<: *loadgen
+    depends_on:
+      service-b-group-1-1:
+        condition: service_healthy
+    environment:
+      <<: *loadgen-env
+      TARGET: http://lb-b
+      STATUS_TARGET: http://service-b-group-1-1:8080
 
   # --- наблюдение: сборщик метрик, сборщик метрик базы, витрина ---
   # Ни один из них не входит ни в одну цепочку depends_on: недоступность наблюдения не должна мешать
@@ -323,29 +401,30 @@ services:
       retries: 20
 
   # Сборщик метрик базы: сессии пулов по application_name, состояние экземпляра postgres.
+  # По одному сборщику на базу: sessions пулов попадают в сборщик своей базы, и сводка по имени
+  # приложения не дублирует ряды, потому что имя приложения (POOL_NAME) уникально на стенд.
   # Подключается существующим суперпользователем стенда (POSTGRES_USER — он суперпользователь,
-  # поэтому видны сессии всех инстансов). Отдельная роль с pg_monitor для боевого контура.
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.20.1
-    mem_limit: 256m
+  # поэтому видны сессии всех инстансов, а зарезервированные слоты не занимаются флотом).
+  # Отдельная роль с pg_monitor для боевого контура.
+  postgres-exporter-a:
+    <<: *exporter
     environment:
       DATA_SOURCE_NAME: >-
-        postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-demo}?sslmode=disable
+        postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres-a:5432/${POSTGRES_DB:-demo}?sslmode=disable
       # Сессии пулов нужны как основной показатель «кто сколько держит», поэтому сборщик явно
       # включён, а не полагается на значение по умолчанию образа.
       PG_EXPORTER_COLLECTOR_STAT_ACTIVITY: "true"
-    command:
-      - --collector.stat_activity
-      - --collector.stat_activity_autovacuum
-      - --web.listen-address=:9187
     ports:
-      - "${EXPORTER_PORT:-9187}:9187"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
-      interval: 10s
-      timeout: 5s
-      start_period: 20s
-      retries: 20
+      - "${EXPORTER_PORT_A:-9187}:9187"
+
+  postgres-exporter-b:
+    <<: *exporter
+    environment:
+      DATA_SOURCE_NAME: >-
+        postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres-b:5432/${POSTGRES_DB:-demo}?sslmode=disable
+      PG_EXPORTER_COLLECTOR_STAT_ACTIVITY: "true"
+    ports:
+      - "${EXPORTER_PORT_B:-9188}:9187"
 
   # Витрина метрик: источник данных и панели поставляются из репозитория, правки в интерфейсе
   # перезаписываются при перезапуске (поставщик панелей запрещает сохранение).
@@ -380,5 +459,6 @@ services:
     profiles: ["tools"]
 
 volumes:
-  pg-data:
+  pg-data-a:
+  pg-data-b:
   etcd-data:

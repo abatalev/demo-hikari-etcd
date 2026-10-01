@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Потолки и публикации инстансов по данным etcd (вывод `etcdctl get -w json`).
 
-Аргумент: корень в etcd, например `/config/` (полный снимок, скрипт сам отфильтрует).
+Аргументы: корень в etcd, например `/config/` (полный снимок, скрипт сам отфильтрует), и
+необязательное имя сервиса — тогда показывается только его флот. Фильтр обязателен не для
+красоты: база на сервис, и сводка по всем базам сразу показывала бы сумму флотов там, где
+сравнивают с бюджетом одного сервиса.
 
 Печатает по каждому инстансу приказанный потолок `maximumPoolSize` и опубликованное
 неосвобождённое сжатие `unreleasedConnections`, затем суммы: сколько флот занимает по отчётам
@@ -25,9 +28,10 @@ def decode(value):
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: fleet-sessions.py <root-prefix>", file=sys.stderr)
+        print("usage: fleet-sessions.py <root-prefix> [service]", file=sys.stderr)
         return 1
     root = sys.argv[1].rstrip("/")
+    only = sys.argv[2] if len(sys.argv) > 2 else None
     kvs = json.load(sys.stdin)["kvs"]
 
     # {root}/services/{service}/groups/{group}/instances/{instance}/{hikari/…|unreleasedConnections}
@@ -47,6 +51,8 @@ def main():
         if len(parts) < 5 or parts[1] != "groups" or parts[3] != "instances":
             continue
         node = "/".join([parts[0], parts[2], parts[4]])
+        if only is not None and parts[0] != only:
+            continue
         nodes.add(node)
         if len(parts) == 6 and parts[5] == PUBLICATION:
             published[node] = decode(entry["value"])
@@ -54,7 +60,8 @@ def main():
             ceilings[node] = decode(entry["value"])
 
     if not nodes:
-        print("  (живых инстансов в etcd нет)")
+        scope = f"сервиса {only}" if only else None
+        print(f"  (живых инстансов {scope + ' ' if scope else ''}в etcd нет)")
         return 0
 
     def number(value):

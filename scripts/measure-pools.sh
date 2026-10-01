@@ -1,10 +1,20 @@
 #!/bin/sh
 # Поинстансная выборка сессий пула одной строкой на замер: t i1=… i2=… всего=N.
 # Сумма по флоту скачет, и по одной сумке не понять, кто освобождал, а кто набирал.
-# Использование: measure-pools.sh <seconds> [шаблон имени]
+#
+# База на сервис, поэтому сервис обязателен: поинстансная картина нескольких баз
+# вперемешку не отвечает на вопрос «кто в своём флоте освобождал».
+#
+# Использование: measure-pools.sh <service> [seconds] [шаблон имени]
 set -eu
-SECS="${1:-20}"
-PATTERN="${2:-service-%}"
+SERVICE="${1:-}"
+if [ -z "$SERVICE" ]; then
+    echo "укажи сервис: measure-pools.sh service-a [seconds] [шаблон]" >&2
+    exit 1
+fi
+SECS="${2:-20}"
+PATTERN="${3:-${SERVICE}-group-%}"
+echo "база сервиса $SERVICE, шаблон $PATTERN"
 i=0
 while [ "$i" -lt $((SECS * 4)) ]; do
     psql -U "${POSTGRES_USER:-app}" -d "${POSTGRES_DB:-demo}" -At -F' ' -c \
