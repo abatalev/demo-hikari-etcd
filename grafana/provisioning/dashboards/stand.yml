@@ -1,0 +1,17 @@
+apiVersion: 1
+
+providers:
+  # Панели лежат в репозитории и поставляются только на чтение: поставщик не даёт витрине создать
+  # копию, а правка в интерфейсе перезаписывается при следующей поставке. Это осознанно (см.
+  # docs/operations.md), иначе стенд тихо разъезжается с репозиторием.
+  - name: stand
+    orgId: 1
+    folder: Стенд
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      # Не /var/lib/grafana/dashboards: оттуда поставщик файлов не читает.
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

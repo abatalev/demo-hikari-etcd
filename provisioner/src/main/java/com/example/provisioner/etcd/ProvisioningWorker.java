@@ -30,6 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.example.provisioner.metrics.ProvisionerMetrics;
+
 /**
  * Воркер провижининга одного сервиса: держит инвариант «ключи конфигурации инстанса существуют
  * тогда и только тогда, когда существует его узел и узел получил долю сервисного бюджета» внутри
@@ -137,6 +139,12 @@ final class ProvisioningWorker implements Runnable {
     /** Остановка воркера: снимает флаг активности и прерывает оба цикла (watch закроется). */
     void stop() {
         active.set(false);
+        // Воркер остановлен — величины флота застывают последними известными. Признак «снимок
+        // устарел» обязан это сказать: иначе после сброса аренды выборов (обрыв etcd, перехват
+        // лидерства) наблюдение показывало бы свежие числа от процесса, который их больше не
+        // обновляет. Величины при этом не обнуляются: конфигурация и пул продолжают жить на
+        // последнем применённом состоянии.
+        owner.metrics().state(service).snapshotReceived(false);
         Thread t = thread;
         if (t != null) {
             t.interrupt();
@@ -168,6 +176,8 @@ final class ProvisioningWorker implements Runnable {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
+                // Снимка нет: величины остаются последними известными, но помечаются как устаревшие.
+                owner.metrics().state(service).snapshotReceived(false);
                 log.warn("воркер сервиса {}: etcd недоступен/ошибка ({}), повтор через {} мс",
                         service, e.toString(), backoffMs);
                 if (!owner.sleep(backoffMs)) {
@@ -242,6 +252,8 @@ final class ProvisioningWorker implements Runnable {
             groups.add(node.group());
         }
         myGroups = groups;
+        // Снимок получен: оценки в метриках снова соответствуют хранилищу.
+        owner.metrics().state(service).snapshotReceived(true);
         return tree;
     }
 
@@ -327,6 +339,7 @@ final class ProvisioningWorker implements Runnable {
      * считать состав одновременно.
      */
     private void apply(Client c, Tree tree) throws Exception {
+        owner.metrics().recompute();
         provision(c, tree, true);
     }
 
@@ -445,9 +458,19 @@ final class ProvisioningWorker implements Runnable {
             }
             String prefix = hikariPrefixByNode.get(decision.nodeKey());
             servedPrefixes.add(prefix);
-            resizes += setPoolSize(c, prefix, String.valueOf(decision.command()));
+            int written = setPoolSize(c, prefix, String.valueOf(decision.command()));
+            resizes += written;
             if (decision.grows()) {
                 grew++;
+            }
+            if (written > 0) {
+                // Считаем приказы, состоявшиеся записью: приказ, равный текущему значению,
+                // ключа не меняет и повторного роста или сжатия не создаёт.
+                if (decision.grows()) {
+                    owner.metrics().commandGrow();
+                } else if (decision.shrinks()) {
+                    owner.metrics().commandShrink();
+                }
             }
             if (full && !tree.configPrefixes.contains(prefix)) {
                 // Префикса ещё нет: инстанс ещё не обслуживался, и стартовые ключи ему нужны.
@@ -471,6 +494,14 @@ final class ProvisioningWorker implements Runnable {
         }
 
         reportStuckDebt(tree, plan);
+
+        // Величины флота в метриках: ровно те, по которым принято решение выше. Полный пересчёт
+        // состава обнуляет накопленный максимум оценки — дальше он снова копится с нуля.
+        owner.metrics().state(service).fleet(
+                new ProvisionerMetrics.FleetSample(budget, min, reserve, tree.nodes.size(),
+                        activeKeys.size(), deferred, plan.sumCeilings(), plan.sumConfirmedDebt(),
+                        plan.sumHeld(), plan.growable()),
+                full);
 
         if (resizes > 0 || cleaned > 0 || deferred > 0 || excess > 0 || k > 0
                 || !activeKeys.isEmpty()) {
@@ -567,11 +598,29 @@ final class ProvisioningWorker implements Runnable {
     private void reportStuckDebt(Tree tree, ConnectionGrowth.Result plan) {
         long now = System.currentTimeMillis();
         long thresholdMs = owner.properties().getStuckDebtWarnMs();
-        if (thresholdMs <= 0) {
-            return;
+        int stuck = 0;
+        if (thresholdMs > 0) {
+            stuck = countStuckDebt(tree, plan, now, thresholdMs);
         }
+        // Текущее число зависших узлов, а не счётчик предупреждений: счётчик помнит историю и
+        // держал бы правило сработавшим ещё 15 минут после того, как сжатие освободилось.
+        owner.metrics().state(service).stuckShrink(stuck);
+    }
+
+    /**
+     * Считает узлы, у которых подтверждённое сжатие не уменьшается дольше порога, и предупреждает
+     * один раз на узел.
+     *
+     * <p>Только подтверждённые публикации: без них долг — худший случай, который честно
+     * придерживает рост, но зависанием не является. Иначе предупреждение сыпалось бы на каждом
+     * штатном перезапуске флота, где публикаций нет ни у кого.
+     *
+     * @return число узлов с зависшим сжатием на этом проходе
+     */
+    private int countStuckDebt(Tree tree, ConnectionGrowth.Result plan, long now, long thresholdMs) {
+        int stuck = 0;
         for (ConnectionGrowth.Decision decision : plan.decisions()) {
-            int debt = debtOf(tree, decision.nodeKey());
+            int debt = confirmedDebtOf(tree, decision.nodeKey());
             if (debt <= 0) {
                 // Долга нет: забываем узел, чтобы предупреждение не всплыло снова после
                 // следующего сжатия с другой величиной.
@@ -580,10 +629,12 @@ final class ProvisioningWorker implements Runnable {
                 stuckDebtWarned.remove(decision.nodeKey());
                 continue;
             }
+            stuck++;
             Long since = stuckDebtSince.get(decision.nodeKey());
             Integer previous = stuckDebtValue.get(decision.nodeKey());
             if (previous != null && previous == debt && since != null && now - since >= thresholdMs) {
                 if (stuckDebtWarned.add(decision.nodeKey())) {
+                    owner.metrics().stuckDebtWarning();
                     log.warn("сервис {}: неосвобождённое сжатие узла {} держится на {} соединениях "
                                     + "дольше {} с (потолок {}, доля {}, приказано {}) — место не "
                                     + "перераспределяется, флот работает меньше бюджета",
@@ -597,11 +648,12 @@ final class ProvisioningWorker implements Runnable {
                 stuckDebtWarned.remove(decision.nodeKey());
             }
         }
+        return stuck;
     }
 
-    /** Долг узла по снимку: публикация, если подтверждена, иначе худший случай — потолок. */
-    private int debtOf(Tree tree, String nodeKey) {
-        return ConnectionGrowth.debt(new ConnectionGrowth.NodeState(nodeKey,
+    /** Долг узла по подтверждённой публикации; без публикации — ноль, а не потолок. */
+    private int confirmedDebtOf(Tree tree, String nodeKey) {
+        return ConnectionGrowth.confirmedDebt(new ConnectionGrowth.NodeState(nodeKey,
                 ceilingOf(tree, nodeKey), null, reportOf(tree, nodeKey),
                 reportAcknowledged(tree, nodeKey)));
     }
@@ -696,6 +748,7 @@ final class ProvisioningWorker implements Runnable {
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
         long deleted = del.getDeleted();
         if (deleted > 0) {
+            owner.metrics().prefixWipe();
             log.info("очистка: удалено {} ключей префикса {}", deleted, hikariPrefix);
         }
     }
@@ -784,6 +837,7 @@ final class ProvisioningWorker implements Runnable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
+            owner.metrics().state(service).snapshotReceived(false);
             log.warn("сервис {}: не удалось обработать событие {} ключа {}: {} — догонит сверка",
                     service, event.getEventType(), key, e.toString());
         }

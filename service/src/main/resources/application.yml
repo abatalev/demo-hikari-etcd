@@ -11,7 +11,15 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      # Общие признаки: сборщик раскладывает метрики по флоту и по инстансам без настройки
+      # на своей стороне. Признак называется node, а не instance: instance у сборщика —
+      # адрес цели, и переопределять его нельзя.
+      service: ${SERVICE_NAME:unknown}
+      group: ${ETCD_GROUP:unknown}
+      node: ${ETCD_INSTANCE:unknown}
   endpoint:
     health:
       show-details: always

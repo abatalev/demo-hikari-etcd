@@ -1,0 +1,52 @@
+# Конфигурация сборщика метрик стенда.
+#
+# Цели инстансов читаются из файла prometheus/targets.json, который выводится из
+# ETCD_INSTANCES (make prometheus-targets). Остальные цели статические: имена их сервисов в compose
+# не меняются вместе со списком инстансов.
+#
+# Ни одно наблюдение не является условием готовности инстансов: сборщик поднимается и падает
+# независимо, а проверка его состояния — отдельная команда (make targets).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  # Метрики процесса и пула меняются быстро только под нагрузкой; 5с достаточно, чтобы поймать
+  # переходы пересчёта бюджета (они занимают 0.3-0.8с), и не нагружает ни процессы, ни postgres.
+  external_labels:
+    stand: hikari-etcd
+
+rule_files:
+  # Явно один файл, а не *.yml: рядом лежит stand.test.yml — это проверка правил promtool, а не
+  # правила. Сборщик такую попытку проглотил бы молча (promtool check config — нет).
+  - /etc/prometheus/rules/stand.yml
+
+scrape_configs:
+  # Инстансы сервиса: /actuator/prometheus каждого. Признаки service/group/node отдаёт сам инстанс.
+  - job_name: service
+    # Точка не /metrics: приложение отдаёт приборы на actuator-пути, а не на корне.
+    metrics_path: /actuator/prometheus
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets.json
+        # Файл перегенерируется make up; частая перечитка не нужна, но и не должна отставать
+        # надолго, если файл поменяли вручную.
+        refresh_interval: 30s
+
+  # Обе реплики провизёра: кто вёл сервис, величины флота и счётчики решений видны по обеим.
+  - job_name: provisioner
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - config-provisioner-1:8080
+          - config-provisioner-2:8080
+
+  # etcd отдаёт свои штатные метрики на клиентском порту.
+  - job_name: etcd
+    static_configs:
+      - targets:
+          - etcd:2379
+
+  # Сборщик метрик базы: сессии пулов по application_name, состояние экземпляра postgres.
+  - job_name: postgres
+    static_configs:
+      - targets:
+          - postgres-exporter:9187

@@ -244,6 +244,25 @@ class ConnectionGrowthTest {
     }
 
     @Test
+    @DisplayName("подтверждённый долг ноль там, где публикации нет, а верхняя оценка полна")
+    void confirmedDebtNeedsReport() {
+        // «b» без публикации: для ограничения роста он держит весь потолок (худший случай),
+        // но подтверждённого сжатия за ним нет — держать сверх потолка молча нельзя.
+        ConnectionGrowth.Result result = plan(N,
+                node("a", 25, 25, 10),
+                node("b", 25, 25));
+
+        assertEquals(10, result.sumConfirmedDebt());
+        // Верхняя оценка по-прежнему полна: 25 + (10 + 25).
+        assertEquals(35, result.sumDebt());
+        assertEquals(85, result.sumHeld());
+        // Публикация без подтверждения (относится к прежнему потолку) — тоже не подтверждение.
+        ConnectionGrowth.Result stale = plan(N,
+                new ConnectionGrowth.NodeState("a", 25, 25, 30, false));
+        assertEquals(0, stale.sumConfirmedDebt());
+    }
+
+    @Test
     @DisplayName("тесный бюджет N=50, второй инстанс лишний: место не выдаётся, пока первый держит")
     void tightBudgetExcessNodeDoesNotUnlockImmediately() {
         // N=50, m=30: обслуживается только один, второй — избыток (конфигурация снимается).

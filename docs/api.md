@@ -251,3 +251,57 @@ Health разбит на две группы с осознанной грани�
 ```
 
 Связь с etcd в деталях смотреть в `/api/config` → `connected` и `lastError`.
+
+## `GET /actuator/prometheus`
+
+Метрики инстанса в текстовом формате prometheus. Точка та же, что снимает сборщик
+(`metrics_path: /actuator/prometheus` в `prometheus/prometheus.yml`), аутентификации нет, соединений
+из пула эндпоинт **не берёт** — все величины берутся из снимка `runtime()`.
+
+Признаки на всех доменных метриках: `service`, `group`, `node` (значения `SERVICE_NAME`,
+`ETCD_GROUP`, `ETCD_INSTANCE`). Метки `instance` нет — она зарезервирована сборщиком за адрес цели.
+У провизёра вместо них признак `replica` (`PROV_NAME`) и `service` у величин по сервису.
+
+```text
+# HELP pool_connections_open открытые соединения обоих поколений
+# TYPE pool_connections_open gauge
+pool_connections_open{group="group-1",node="service-a-group-1-1",service="service-a"} 25.0
+# HELP pool_maximum_pool_size текущий потолок пула
+# TYPE pool_maximum_pool_size gauge
+pool_maximum_pool_size{group="group-1",node="service-a-group-1-1",service="service-a"} 25.0
+# HELP pool_traffic_gate_open инстанс готов принимать трафик
+# TYPE pool_traffic_gate_open gauge
+pool_traffic_gate_open{group="group-1",node="service-a-group-1-1",service="service-a"} 1.0
+# HELP hikaricp_connections_acquire_seconds …
+# TYPE hikaricp_connections_acquire_seconds histogram
+hikaricp_connections_acquire_seconds_count{…} 182
+```
+
+Полный список имён с описаниями — в `openspec/changes/metrics-and-fleet-observability/design.md`
+(раздел «Имена метрик»), он же остаётся каноническим при следующих изменениях. Кратко:
+
+| группа | метрики |
+|---|---|
+| размер и состояние пула | `pool_maximum_pool_size`, `pool_minimum_idle`, `pool_generation`, `pool_closing`, `pool_connections_{open,busy,idle,awaiting}`, `pool_evictable_idle`, `pool_unreleased_shrink` |
+| применённая конфигурация | `pool_config_{maximum_pool_size,minimum_idle,connection_timeout_ms}` — **только применённые величины**, без значений из etcd |
+| состояние конфигурации | `pool_config_state{state=none\|applied\|rejected}`, `pool_config_{applied,rejected,unreadable}_total`, `pool_resize_{grow,shrink}_total`, `pool_recreate_total` |
+| гейт и etcd | `pool_traffic_gate_open`, `pool_not_ready_reason{reason=none\|no_config_keys\|etcd_unavailable}`, `pool_etcd_{enabled,connected,watch_active,revision,problems}` |
+| события пула (SPI HikariCP) | `hikaricp_connections_{acquire,usage,creation}_seconds` (гистограммы, границы заданы в коде), `hikaricp_connections_timeout_total` |
+
+Что важно при чтении:
+
+- **Значений конфигурации в метриках нет** (пароль в etcd лежит открытым текстом, а признаки-значения
+  размножили бы кардинальность) — вместо них числовые гейджи применённых величин и состояние из
+  закрытого набора.
+- **`pool_etcd_problems` — журнал за весь процесс**, а не «что сломано сейчас»: непрочитанное значение
+  в etcd остаётся в счётчике после исправления. Текущее состояние — в `/api/config`.
+- **Перцентили по событиям пула берутся из гистограмм**: `histogram_quantile(0.99, sum by (le)
+  (rate(hikaricp_connections_acquire_seconds_bucket[$__rate_interval])))`. Границы заданы в коде
+  (выдача 0.1мс…5с, удержание 1мс…5с, открытие 1мс…1с) и достроены Micrometer геометрически между
+  ними, их около 80 на прибор. Если бы прибор остался summary, запрос по `_bucket` вернул бы пусто
+  без ошибки.
+- **События HikariCP и состояние пула — разные источники**: распределения ожидания/удержания/открытия
+  приходят через SPI, а всё состояние — из `runtime()`. Штатный Micrometer-трекер HikariCP не
+  используется: его гейджи привязаны к первому поколению пула и после пересоздания показывали бы ноль.
+- **Ряды из закрытого набора всегда полные**: `pool_config_state` и `pool_not_ready_reason` публикуются
+  по одному ряду на каждое значение признака, причём `reason="none"` = 1, когда причины нет.

@@ -11,7 +11,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      # Имя реплики — то же значение, что в ключе выборов, поэтому по метрикам видно, кто считал
+      # величины. На стенде PROV_NAME задан явно; локально без него метка будет unknown, а выборы
+      # пойдут по имени хоста (см. ProvisionerProperties.resolveName).
+      replica: ${PROV_NAME:unknown}
   endpoint:
     health:
       show-details: always

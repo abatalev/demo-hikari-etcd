@@ -1,6 +1,7 @@
 package com.example.provisioner.etcd;
 
 import com.example.provisioner.config.ProvisionerProperties;
+import com.example.provisioner.metrics.ProvisionerMetrics;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KeyValue;
@@ -64,6 +65,7 @@ public class ConfigProvisioner implements SmartLifecycle {
     private static final long ELECTION_POLL_MS = 1_000L;
 
     private final ProvisionerProperties properties;
+    private final ProvisionerMetrics metrics;
 
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicReference<Client> clientRef = new AtomicReference<>();
@@ -84,8 +86,9 @@ public class ConfigProvisioner implements SmartLifecycle {
     private volatile Thread leaseThread;
     private volatile Thread electionThread;
 
-    public ConfigProvisioner(ProvisionerProperties properties) {
+    public ConfigProvisioner(ProvisionerProperties properties, ProvisionerMetrics metrics) {
         this.properties = properties;
+        this.metrics = metrics;
         this.replicaName = properties.resolveName();
         String root = InstanceKey.normalizedRoot(properties.getRoot());
         this.servicesPrefix = root + "/services/";
@@ -313,6 +316,9 @@ public class ConfigProvisioner implements SmartLifecycle {
                     service, kvs.isEmpty() ? "нет" : kvs.get(0).getLease());
         }
         leaderState.put(service, mine);
+        // Ряд лидерства есть у обеих реплик: по метрикам видно, кто вёл сервис, даже когда
+        // ведущим был не этот процесс.
+        metrics.state(service).leading(mine);
         return mine;
     }
 
@@ -375,6 +381,14 @@ public class ConfigProvisioner implements SmartLifecycle {
             }
             workers.clear();
         }
+        // Лидерство снято — признак обязан это показать. Иначе при обрыве etcd ряд лидерства
+        // остаётся единицей у реплики, которая воркеры уже остановила: наблюдение утверждало бы
+        // «ведёт», а величины флота при этом застывшие, последние известные. Именно этот случай
+        // (сбой аренды выборов) и обязан быть виден.
+        leaderState.clear();
+        for (String service : metrics.services()) {
+            metrics.state(service).leading(false);
+        }
     }
 
     /** Отзыв аренды выборов (штатная остановка). Ключи узлов реплики исчезают сразу. */
@@ -396,6 +410,11 @@ public class ConfigProvisioner implements SmartLifecycle {
             }
         }
         leaseId.compareAndSet(lease, -1);
+    }
+
+    /** Метрики реплики; воркер публикует в них величины флота и счётчики решений. */
+    ProvisionerMetrics metrics() {
+        return metrics;
     }
 
     boolean sleep(long ms) {

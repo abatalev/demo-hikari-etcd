@@ -1,5 +1,6 @@
 package com.example.poolsvc.config;
 
+import com.example.poolsvc.metrics.PoolCounters;
 import com.example.poolsvc.pool.ManagedPool;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
@@ -18,13 +19,14 @@ public class PoolBeansConfiguration {
      * (холодная группа, снятие конфигурации) закрывает его с дренажом.
      */
     @Bean(destroyMethod = "close")
-    ManagedPool managedPool(DbProperties properties) {
+    ManagedPool managedPool(DbProperties properties, PoolCounters counters) {
         return new ManagedPool(
                 properties.toSettings(),
                 properties.getInitializationFailTimeoutMs(),
                 properties.isRegisterMbeans(),
                 properties.isEagerFillOnResize(),
-                properties.getDrainOnRecreateTimeout());
+                properties.getDrainOnRecreateTimeout(),
+                counters);
     }
 
     @Bean

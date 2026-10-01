@@ -2,12 +2,22 @@
 # Ждёт, пока все инстансы (порты из кортежей s|g|i|port) не станут готовы
 # (/actuator/health/readiness = UP) и оба балансировщика не ответят на /healthz.
 # С таймаутом: по истечении перечисляет, что не готово, и завершается с кодом 1.
+#
+# Сборщик метрик, сборщик метрик базы и витрина в это условие НЕ входят: недоступность наблюдения
+# не должна ронять подъём стенда и мешать обслуживанию трафика. Их готовность ждём отдельно и
+# коротко, а по итогам печатаем состояние — решение о том, мешает ли это, остаётся за человеком.
 set -u
 
 INSTANCES="$1"
 LB_A_PORT="$2"
 LB_B_PORT="$3"
 WAIT_S="${4:-120}"
+PROM_PORT="${5:-9090}"
+GRAFANA_PORT="${6:-3000}"
+EXPORTER_PORT="${7:-9187}"
+
+# Окно ожидания наблюдения: отдельное и короткое, чтобы стенд не ждал его впустую.
+OBS_WAIT_S="${OBS_WAIT_S:-60}"
 
 deadline=$(( $(date +%s) + WAIT_S ))
 
@@ -29,7 +39,7 @@ while :; do
     done
     if [ "$ok" -eq 1 ]; then
         echo "все инстансы и балансировщики готовы"
-        exit 0
+        break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "ТАЙМАУТ (${WAIT_S}с): не готовы: ${failing[*]}" >&2
@@ -39,3 +49,31 @@ while :; do
     fi
     sleep 2
 done
+
+# Наблюдение ждём отдельно и его недоступность не считаем ошибкой стенда.
+echo "--- наблюдение (не условие готовности, до ${OBS_WAIT_S}с) ---"
+obs_deadline=$(( $(date +%s) + OBS_WAIT_S ))
+while :; do
+    obs_left=()
+    check_obs() {
+        if curl -fsS --max-time 5 "$1" >/dev/null 2>&1; then
+            echo "  готов: $2"
+        else
+            obs_left+=("$2")
+        fi
+    }
+    check_obs "http://localhost:${PROM_PORT}/-/ready" "сборщик метрик@${PROM_PORT}"
+    check_obs "http://localhost:${EXPORTER_PORT}/metrics" "сборщик метрик базы@${EXPORTER_PORT}"
+    check_obs "http://localhost:${GRAFANA_PORT}/api/health" "витрина метрик@${GRAFANA_PORT}"
+    if [ ${#obs_left[@]} -eq 0 ] || [ "$(date +%s)" -ge "$obs_deadline" ]; then
+        if [ ${#obs_left[@]} -gt 0 ]; then
+            echo "  НЕ ГОТОВО (стенд работает): ${obs_left[*]}" >&2
+            echo "  состояние контейнеров: docker compose ps prometheus postgres-exporter grafana" >&2
+            echo "  логи: docker compose logs prometheus postgres-exporter grafana" >&2
+        fi
+        break
+    fi
+    sleep 2
+done
+
+exit 0

@@ -81,11 +81,13 @@ public final class ConnectionGrowth {
      * @param losesConfig узлы без доли: их конфигурация снимается, ключ записи не пишется
      * @param growable величина роста, общая на сервис: сколько флот реально не занимает
      * @param sumCeilings сумма текущих потолков
-     * @param sumDebt сумма долгов
+     * @param sumDebt сумма долгов по худшему случаю — ею ограничивается рост
+     * @param sumConfirmedDebt сумма долгов по подтверждённым публикациям — что флот действительно
+     *         держит сверх потолков
      * @param sumHeld сумма «потолок + долг» — сколько флот занимает по факту
      */
     public record Result(List<Decision> decisions, List<String> losesConfig, int growable,
-            int sumCeilings, int sumDebt, int sumHeld) {
+            int sumCeilings, int sumDebt, int sumConfirmedDebt, int sumHeld) {
     }
 
     private ConnectionGrowth() {
@@ -100,10 +102,15 @@ public final class ConnectionGrowth {
     public static Result plan(int budget, List<NodeState> nodes) {
         long sumCeilings = 0;
         long sumDebt = 0;
+        long sumConfirmedDebt = 0;
         long sumHeld = 0;
         for (NodeState node : nodes) {
             sumCeilings += node.ceiling();
             sumDebt += debt(node);
+            // Отдельно то, что подтверждено публикацией: худший случай для ограничения роста
+            // безопасен, но как наблюдение он был бы выдумкой — на штатном перезапуске флота, где
+            // публикаций нет ни у кого, он даёт N целиком.
+            sumConfirmedDebt += confirmedDebt(node);
             sumHeld += node.ceiling() + debt(node);
         }
 
@@ -129,7 +136,7 @@ public final class ConnectionGrowth {
                     command > node.ceiling(), command < node.ceiling()));
         }
         return new Result(decisions, losesConfig, growable, (int) sumCeilings, (int) sumDebt,
-                (int) sumHeld);
+                (int) sumConfirmedDebt, (int) sumHeld);
     }
 
     /**
@@ -146,5 +153,21 @@ public final class ConnectionGrowth {
             return Math.max(0, node.reported());
         }
         return Math.max(0, node.ceiling());
+    }
+
+    /**
+     * Неосвобождённое сжатие по подтверждённой публикации: сколько узел действительно держит
+     * сверх потолка.
+     *
+     * <p>В отличие от {@link #debt(NodeState)} без подтверждения это ноль, а не потолок: держать
+     * сверх потолка без публикации нельзя — инстанс либо ничего сверху не держит, либо сообщил бы
+     * об этом. Публикация приходит только при изменении, поэтому у только что пересозданного пула
+     * её нет, и это норма, а не зависшее сжатие.
+     */
+    public static int confirmedDebt(NodeState node) {
+        if (node.reported() != null && node.reportAcknowledged()) {
+            return Math.max(0, node.reported());
+        }
+        return 0;
     }
 }

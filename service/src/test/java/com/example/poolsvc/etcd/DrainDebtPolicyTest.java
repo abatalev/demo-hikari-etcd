@@ -13,22 +13,22 @@ class DrainDebtPolicyTest {
 
     /** Потолок прежний, квант выключен: публикация идёт по изменению величины. */
     private static Integer byChange(int debt, Integer last) {
-        return DrainDebtPolicy.toPublish(debt, last, false, QUANTUM_OFF);
+        return DrainDebtPolicy.toPublish(debt, last, false, false, QUANTUM_OFF);
     }
 
     /** Потолок прежний, квант задан. */
     private static Integer byChange(int debt, Integer last, int quantum) {
-        return DrainDebtPolicy.toPublish(debt, last, false, quantum);
+        return DrainDebtPolicy.toPublish(debt, last, false, false, quantum);
     }
 
     /** Потолок изменился: публикуем всегда, квант выключен. */
     private static Integer byCeiling(int debt, Integer last) {
-        return DrainDebtPolicy.toPublish(debt, last, true, QUANTUM_OFF);
+        return DrainDebtPolicy.toPublish(debt, last, true, false, QUANTUM_OFF);
     }
 
     /** Потолок изменился, квант задан. */
     private static Integer byCeiling(int debt, Integer last, int quantum) {
-        return DrainDebtPolicy.toPublish(debt, last, true, quantum);
+        return DrainDebtPolicy.toPublish(debt, last, true, false, quantum);
     }
 
     @Test

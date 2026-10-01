@@ -1,0 +1,1144 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Состояние пулов каждого инстанса: размер, соединения, ожидание выдачи, конфигурация и готовность. Рядом показания процесса и сессии базы — их расхождение и есть диагностический признак.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Размер пула: потолок и применённая конфигурация",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pool_maximum_pool_size{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} потолок пула",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "pool_config_maximum_pool_size{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} конфиг etcd",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "pool_config_minimum_idle{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} минимум idle",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Потолок и применённая конфигурация расходятся в двух случаях: ключ правят руками (до ближайшего пересчёта провизёра) либо инстанс ещё не применил конфигурацию."
+    },
+    {
+      "type": "timeseries",
+      "title": "Соединения по инстансам (процесс)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node) (pool_connections_open{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} открыто",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (node) (pool_connections_busy{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} занято",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (node) (pool_connections_idle{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} свободно",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (node) (pool_connections_awaiting{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} ожидают",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "sum by (node) (pool_closing{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} пула нет",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Что считает процесс. Сверяется с панелью сессий базы: расхождение означает ошибку одного из двух измерений, а не чужие соединения."
+    },
+    {
+      "type": "timeseries",
+      "title": "Ожидание выдачи соединения",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, node) (rate(hikaricp_connections_acquire_seconds_bucket{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} p50",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, node) (rate(hikaricp_connections_acquire_seconds_bucket{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} p99",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Сколько поток ждал выдачи соединения. Рост хвоста при полном пуле означает, что надо место, а не что сбор метрик мешает: сбор не берёт соединений из пула."
+    },
+    {
+      "type": "timeseries",
+      "title": "Время удержания и открытия соединения",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, node) (rate(hikaricp_connections_usage_seconds_bucket{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} удержание p50",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, node) (rate(hikaricp_connections_usage_seconds_bucket{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} удержание p99",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.50, sum by (le, node) (rate(hikaricp_connections_creation_seconds_bucket{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} открытие p50",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Сколько соединение удерживалось и сколько открывалось. Долгое открытие при малом числе выдач — упёрлись в max_connections базы."
+    },
+    {
+      "type": "timeseries",
+      "title": "Ожидающие потоки",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node) (pool_connections_awaiting{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} ожидают",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Очередь за соединение. Ненулевая при полном пуле — норма, ненулевая при наличии свободных соединений — признак зависшего потока."
+    },
+    {
+      "type": "timeseries",
+      "title": "Отказы по таймауту ожидания",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node) (rate(hikaricp_connections_timeout_total{service=~\"$service\",group=~\"$group\",node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} отказов/с",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Отказы по connectionTimeout: выдача не уложилась в таймаут. Растёт вместе с очередью за соединение."
+    },
+    {
+      "type": "timeseries",
+      "title": "Соединения, которые можно освободить",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node) (pool_evictable_idle{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} освобождаемое поколение",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (node) (pool_unreleased_shrink{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} неосвобождённое сжатие",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (node) (pool_generation{service=~\"$service\",group=~\"$group\",node=~\"$node\"})",
+          "legendFormat": "{{node}} поколение пула",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Неосвобождённое сжатие — сколько соединений инстанс удерживает сверх нового потолка. Пока это так, место не перераспределяется; поколение растёт при пересоздании пула."
+    },
+    {
+      "type": "timeseries",
+      "title": "Состояние конфигурации",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pool_config_state{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}}/{{state}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "applied — конфигурация применена, rejected — отклонена, none — источник выключен. Значения конфигурации как признаки не публикуются: пароль в etcd лежит открытым текстом."
+    },
+    {
+      "type": "timeseries",
+      "title": "Гейт трафика и причина неготовности",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pool_traffic_gate_open{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} трафик открыт",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "pool_not_ready_reason{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}}/{{reason}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Гейт закрыт, пока нет ни одного распознанного ключа конфигурации. no_config_keys — провижёр снял конфигурацию (нет доли или холодный флот), etcd_unavailable — нет снимка при живом процессе. Причина none означает, что трафик открыт."
+    },
+    {
+      "type": "timeseries",
+      "title": "Источник конфигурации: etcd",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pool_etcd_connected{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} отвечает",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "pool_etcd_watch_active{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} watch активен",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "pool_etcd_problems{service=~\"$service\",group=~\"$group\",node=~\"$node\"}",
+          "legendFormat": "{{node}} непрочитанных значений",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Обрыв etcd не влияет на пул: connected станет нулём, а трафик и готовность останутся прежними — процесс живёт на последнем применённом конфиге. problems — журнал непрочитанных значений за весь процесс, он не очищается."
+    },
+    {
+      "type": "timeseries",
+      "title": "Сессии пулов по данным базы",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (application_name, state) (pg_stat_activity_count{application_name=~\"$pool_app\"})",
+          "legendFormat": "{{application_name}}/{{state}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Взгляд со стороны postgres: application_name равен имени инстанса (POOL_NAME). Отбор ведётся переменной $pool_app — при смене соглашения об именах правится она одна."
+    },
+    {
+      "type": "timeseries",
+      "title": "Расхождение процесс ↔ база",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 5,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node) (pool_connections_open{service=~\"$service\",group=~\"$group\",node=~\"$node\"}) - on(node) sum by (node) (label_replace(sum by (application_name) (pg_stat_activity_count{application_name=~\"$pool_app\"}), \"node\", \"$1\", \"application_name\", \"(.*)\"))",
+          "legendFormat": "{{node}} расхождение",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Ноль означает согласованность процесса и базы. Ненулевое значение — ошибка одного из двух измерений (например, пересоздание пула в момент сбора), а не чужие соединения: источник истины для потолка — величины провизёра."
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "hikari-etcd-stand",
+    "пулы"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "сервис",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(pool_maximum_pool_size, service)",
+        "query": {
+          "query": "label_values(pool_maximum_pool_size, service)",
+          "refId": "var-service"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 1,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "group",
+        "label": "группа",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(pool_maximum_pool_size{service=~\"$service\"}, group)",
+        "query": {
+          "query": "label_values(pool_maximum_pool_size{service=~\"$service\"}, group)",
+          "refId": "var-group"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 1,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "node",
+        "label": "инстанс",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(pool_maximum_pool_size{service=~\"$service\",group=~\"$group\"}, node)",
+        "query": {
+          "query": "label_values(pool_maximum_pool_size{service=~\"$service\",group=~\"$group\"}, node)",
+          "refId": "var-node"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 1,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "pool_app",
+        "label": "сессии пулов",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+        "query": {
+          "query": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+          "refId": "var-pool_app"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": "service-.+",
+        "refresh": 1,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "timezone": "utc",
+  "title": "Пулы и конфигурация",
+  "uid": "pools-config",
+  "version": 1,
+  "weekStart": ""
+}

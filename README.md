@@ -3,7 +3,8 @@
 Прототип: размер пула соединений каждого инстанса к PostgreSQL 16 меняется **на лету** правкой
 ключа в etcd. Compose-стенд: PostgreSQL 16, etcd, 8 инстансов сервиса (Spring Boot 3 + HikariCP),
 2 балансировщика nginx (граница — по сервису), два провизора конфигурации (лидер выбирается по
-каждому сервису через etcd), нагрузчик и образ с etcdctl.
+каждому сервису через etcd), Prometheus с правилами, Grafana, сборщик метрик базы, нагрузчик и образ
+с etcdctl.
 
 ```
    etcdctl put (бюджет активного флота)   провизёр делит бюджет между активными инстансами
@@ -46,6 +47,10 @@ make budget S=service-a           # доли по сервису и их сум�
 make pool              # сводка: ready/max/total/active/idle по всем 8 инстансам
 make down              # остановить; make clean — вместе с данными (в т.ч. ключи etcd)
 ```
+
+Наблюдение поднимается тем же `make up`: Prometheus на `:9090`, Grafana на `:3000` (анонимный
+просмотр, без логина), сборщик метрик базы на `:9187`. Состояние целей сбора печатается в конце
+`make up` и по требованию — `make targets`. Подробности — [docs/operations.md](docs/operations.md#наблюдение).
 
 Лог инстанса в момент правки:
 
@@ -180,6 +185,9 @@ Maven нужен только для `make test`. Локальный запус�
 | `make ps` | состояние контейнеров |
 | `make instances` | расклад: имя, порт, путь конфигурации по каждому инстансу |
 | `make pool` / `make pool I=…` | сводка по всем инстансам / детально один |
+| `make targets` | состояние целей сбора метрик (нужен поднятый Prometheus) |
+| `make check-targets` | список целей совпадает с `ETCD_INSTANCES` (входит в `make test`) |
+| `make prometheus-targets` | перегенерировать список целей из `ETCD_INSTANCES` |
 | `make config [I=…]` | ключи инстанса в etcd |
 | `make registrations` | узлы регистрации инстансов в etcd (кто сейчас жив) |
 | `make leader` | кто ведёт каждый сервис (лидер выборов провизора) |
@@ -202,7 +210,7 @@ Maven нужен только для `make test`. Локальный запус�
 | `make logs P=service-a-group-1-1` | логи инстанса |
 | `make load-logs` | логи нагрузчика |
 | `make service-restart P=…` | перезапустить инстанс |
-| `make test` | юнит-тесты (нужен maven) |
+| `make test` | юнит-тесты (нужен maven), сверка целей сбора, `promtool check config/rules` |
 
 `make stress` без явного `DURATION_S` больше не зависает: для разового прогона он по умолчанию
 20 секунд (для постоянной нагрузки работает `loadgen`-сервис — например, `docker compose
@@ -216,9 +224,13 @@ restart loadgen` или пусть крутится как есть).
 - Балансировка: round-robin nginx + `proxy_next_upstream error timeout http_502 http_503` +
   `max_fails=1 fail_timeout=5s`. Неготовый инстанс (503 от гейта) выпадает из ротации примерно
   на 5 секунд; открытый nginx активных health-чеков не имеет — это ограничение.
+- Наблюдение: `prometheus :9090`, `grafana :3000`, `postgres-exporter :9187` (порты из
+  `PROM_PORT`/`GRAFANA_PORT`/`EXPORTER_PORT` в `.env`). Ни один из них не входит в цепочки
+  `depends_on`: недоступность наблюдения не мешает подъёму стенда и обслуживанию трафика.
 - Канонический список инстансов (`service|group|instance|port`) — `ETCD_INSTANCES` в `.env`. Его
-  читают compose (раскладка сервисов) и Makefile (адресация ручных правок); блоки сервисов в
-  `docker-compose.yml` должны совпадать с ним — расхождение видно через `make instances`.
+  читают compose (раскладка сервисов), Makefile (адресация ручных правок) и список целей сбора
+  метрик (`make prometheus-targets`); блоки сервисов в `docker-compose.yml` должны совпадать с ним —
+  расхождение видно через `make instances` и `make check-targets`.
 
 ## Готовность к трафику (гейт конфигурации)
 
@@ -315,6 +327,7 @@ docker compose start service-a-group-1-2
 | `GET /api/work?ms=20` | взять коннект, сделать запрос, поспать в БД; **503**, пока гейт закрыт |
 | `GET /actuator/health/readiness` | готовность: гейт конфигурации (`readinessState` + `poolEtcd`) и база |
 | `GET /actuator/health/liveness` | живость: только `ping`, от etcd и базы не зависит |
+| `GET /actuator/prometheus` | метрики инстанса в текстовом формате prometheus (те же имена, что на витрине) |
 
 С примерами ответа и разбором полей — [docs/api.md](docs/api.md). В `pool_sessions` пулы
 различаются по `application_name` (равен `POOL_NAME` = имени инстанса) — view показывает каждый
@@ -362,7 +375,10 @@ provisioner/   два провизора с выборами лидера по �
 loadgen/       нагрузчик на голом JDK (TARGET / STATUS_TARGET)
 nginx/         шаблон конфига балансировщика (envsubst: BACKEND_1..4)
 etcd/          образ с etcdctl для ручных правок
-scripts/       wait-ready.sh (make up с таймаутом), pool-all.py (сводка), leaders.py (make leader)
+prometheus/    конфигурация сборщика, список целей (из ETCD_INSTANCES), правила (promtool)
+grafana/       источник данных и три панели, поставляются только на чтение
+scripts/       wait-ready.sh (make up с таймаутом), pool-all.py (сводка), leaders.py (make leader),
+               targets.py (список целей сбора), targets-state.py (состояние целей), measure-fleet.sh
 db/init/       демо-таблица + view pool_sessions
 openspec/      спецификации и изменения (config.yaml, specs/, changes/)
 .opencode/     слэш-команды и скилы OpenSpec для OpenCode
@@ -371,7 +387,10 @@ openspec/      спецификации и изменения (config.yaml, spec
 Юнит-тесты без etcd и без БД: `HikariSettingsTest` (валидация, дефолты, diff), `EtcdKeysTest`
 (разбор ключей), `EtcdKeyPathTest` (путь и валидация сегментов) — у сервиса, и
 `InstanceKeyTest`/`ElectionTimingsTest`/`GroupFleetKeyTest` (грамматика узла/конфигурации, набор
-живых сервисов, интервал keepalive, маркеры флота) — у провизора. Watch-циклы и выборы лидера
+живых сервисов, интервал keepalive, маркеры флота) — у провизора. Метрики покрыты
+`HikariEventMetricsTest`/`PoolGaugesTest` (события пула, ряды состояния, отсутствие пароля в
+метриках) и `ProvisionerMetricsTest` (величины флота, максимум оценки и его сброс, устаревание
+снимка). Watch-циклы и выборы лидера
 проверяются на живом стенде (Testcontainers в проекте нет).
 
 ## Решения, которые стоит знать

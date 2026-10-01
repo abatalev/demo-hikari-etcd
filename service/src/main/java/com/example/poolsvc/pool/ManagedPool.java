@@ -15,9 +15,13 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 import javax.sql.DataSource;
 import org.slf4j.LoggerFactory;
+
+import com.example.poolsvc.metrics.HikariEventMetrics;
+import com.example.poolsvc.metrics.PoolCounters;
 
 /**
  * DataSource поверх HikariCP, который никогда не пересоздаётся "просто так".
@@ -46,6 +50,12 @@ public class ManagedPool implements DataSource, AutoCloseable {
     private final boolean registerMbeans;
     private final boolean eagerFillOnResize;
     private final Duration drainTimeout;
+
+    /** Счётчики решений пула; null — наблюдение выключено. */
+    private final PoolCounters counters;
+
+    /** Приборы событий пула (SPI HikariCP); null — наблюдение выключено. */
+    private final HikariEventMetrics eventMetrics;
 
     private final AtomicReference<HikariDataSource> dataSource = new AtomicReference<>();
     private final AtomicReference<HikariSettings> applied = new AtomicReference<>();
@@ -111,11 +121,13 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
-            boolean eagerFillOnResize, Duration drainTimeout) {
+            boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters) {
         this.initializationFailTimeoutMs = initializationFailTimeoutMs == null ? -1L : initializationFailTimeoutMs;
         this.registerMbeans = registerMbeans;
         this.eagerFillOnResize = eagerFillOnResize;
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
+        this.counters = counters;
+        this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
         HikariSettings.Normalized startup = defaults.normalize();
         startup.warnings().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
         if (startup.settings().maximumPoolSize() > 0) {
@@ -149,6 +161,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
             warnings = normalized.warnings();
         } catch (InvalidSettingsException e) {
             HikariSettings appliedSettings = applied.get();
+            count(c -> c.configRejected());
             log.error("[{}] конфиг отклонён ({}), остаёмся на предыдущих значениях: {}",
                     reason, e.getMessage(), appliedSettings == null ? "<пула нет>" : appliedSettings.redacted());
             return new ApplyResult(Outcome.REJECTED, List.of("rejected: " + e.getMessage()), null);
@@ -169,6 +182,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
             // Пула ещё нет (старт с локальным максимумом 0): первый принятый конфиг создаёт его.
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
             create(target, reason);
+            count(c -> c.configApplied());
             return new ApplyResult(Outcome.CREATED, List.of(), applied.get());
         }
 
@@ -180,6 +194,10 @@ public class ManagedPool implements DataSource, AutoCloseable {
             List<String> changes = current.diff(target);
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
             create(target, reason);
+            if (targetChanged && ds != null) {
+                count(c -> c.recreated());
+            }
+            count(c -> c.configApplied());
             return new ApplyResult(targetChanged && ds != null ? Outcome.RECREATED : Outcome.CREATED,
                     changes, applied.get());
         }
@@ -195,6 +213,12 @@ public class ManagedPool implements DataSource, AutoCloseable {
         applyOnLivePool(current, target, reason);
         applied.set(target);
         resizeCount.incrementAndGet();
+        if (target.maximumPoolSize() > current.maximumPoolSize()) {
+            count(c -> c.resizeGrow());
+        } else {
+            count(c -> c.resizeShrink());
+        }
+        count(c -> c.configApplied());
         lastReason.set(reason);
         lastChangeAt.set(System.currentTimeMillis());
         log.info("[{}] пул '{}' обновлён на лету: {} | now: max={} minIdle={} total={}",
@@ -264,6 +288,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
                     reason, target.poolName(), current.maximumPoolSize());
         }
         applied.set(target);
+        count(c -> c.configApplied());
         lastReason.set(reason);
         lastChangeAt.set(System.currentTimeMillis());
         return new ApplyResult(Outcome.CLOSED,
@@ -400,6 +425,11 @@ public class ManagedPool implements DataSource, AutoCloseable {
         config.setRegisterMbeans(registerMbeans);
         // чтобы считать свои сессии в pg_stat_activity
         config.addDataSourceProperty("ApplicationName", settings.poolName());
+        // События пула (ожидание выдачи, удержание, открытие, таймауты) — единственное место, где
+        // пул рождается, поэтому прибор подключается здесь и не наследует прошлых поколений.
+        if (eventMetrics != null) {
+            config.setMetricsTrackerFactory(eventMetrics);
+        }
 
         HikariDataSource previous = dataSource.get();
         HikariDataSource fresh = new HikariDataSource(config);
@@ -429,6 +459,13 @@ public class ManagedPool implements DataSource, AutoCloseable {
                     settings.maximumPoolSize(), settings.minimumIdle(), settings.connectionTimeoutMs());
         } else {
             log.info("[{}] HikariCP '{}' пересоздан (сменилась цель: jdbcUrl/креды/имя)", reason, settings.poolName());
+        }
+    }
+
+    /** Счётчик решения — только если наблюдение включено. */
+    private void count(Consumer<PoolCounters> action) {
+        if (counters != null) {
+            action.accept(counters);
         }
     }
 

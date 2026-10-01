@@ -295,6 +295,81 @@ services:
       DURATION_S: ${DURATION_S:-0}
     restart: unless-stopped
 
+  # --- наблюдение: сборщик метрик, сборщик метрик базы, витрина ---
+  # Ни один из них не входит ни в одну цепочку depends_on: недоступность наблюдения не должна мешать
+  # ни подъёму стенда, ни обслуживанию трафика. Состояние целей — отдельная проверка (make targets).
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    mem_limit: 512m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Стенду хватает окна в пару часов: нужна история переходов для разбора, а не хранилище.
+      # Постоянного тома нет намеренно — после перезапуска история теряется (см. docs/operations.md).
+      - --storage.tsdb.retention.time=2h
+    volumes:
+      # Конфигурация, правила и список целей лежат в репозитории; список целей перегенерирует make
+      # prometheus-targets из ETCD_INSTANCES. Каталог целиком: пути в конфигурации совпадают с
+      # путями в репозитории, поэтому правила и цели не надо перечислять поимённо.
+      - ./prometheus:/etc/prometheus:ro
+    ports:
+      - "${PROM_PORT:-9090}:9090"
+    healthcheck:
+      # /-/ready: сборщик отвечает, когда он действительно готов принимать цели, а не просто запущен.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
+  # Сборщик метрик базы: сессии пулов по application_name, состояние экземпляра postgres.
+  # Подключается существующим суперпользователем стенда (POSTGRES_USER — он суперпользователь,
+  # поэтому видны сессии всех инстансов). Отдельная роль с pg_monitor для боевого контура.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    mem_limit: 256m
+    environment:
+      DATA_SOURCE_NAME: >-
+        postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-demo}?sslmode=disable
+      # Сессии пулов нужны как основной показатель «кто сколько держит», поэтому сборщик явно
+      # включён, а не полагается на значение по умолчанию образа.
+      PG_EXPORTER_COLLECTOR_STAT_ACTIVITY: "true"
+    command:
+      - --collector.stat_activity
+      - --collector.stat_activity_autovacuum
+      - --web.listen-address=:9187
+    ports:
+      - "${EXPORTER_PORT:-9187}:9187"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 20
+
+  # Витрина метрик: источник данных и панели поставляются из репозитория, правки в интерфейсе
+  # перезаписываются при перезапуске (поставщик панелей запрещает сохранение).
+  grafana:
+    image: grafana/grafana:13.1.1
+    mem_limit: 512m
+    environment:
+      # Анонимный просмотр без логина: стенд локальный, а логин только мешает смотреть графики.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
   # Инструмент для ручной работы с конфигом: make config / make set-size N
   etcdctl:
     <<: *etcdctl

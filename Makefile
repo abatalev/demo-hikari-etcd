@@ -23,9 +23,19 @@ REPORT_MS ?= 2000
 DURATION_S ?= 0
 LB_A_PORT ?= 8080
 LB_B_PORT ?= 8081
+PROM_PORT ?= 9090
+GRAFANA_PORT ?= 3000
+EXPORTER_PORT ?= 9187
 WAIT_S ?= 120
 TARGET ?= http://lb-a
 STATUS_TARGET ?= http://$(call tuple_instance,$(word 1,$(TUPLES))):8080
+
+# --- список целей сбора метрик ---
+# Выводится из ETCD_INSTANCES: имя инстанса одновременно имя сервиса в compose, поэтому третья копия
+# списка инстансов в репозитории не появляется. Файл зафиксирован (сборщик поднимается и без make),
+# а make check-targets ловит расхождение.
+TARGETS_FILE ?= prometheus/targets.json
+METRICS_PORT ?= 8080
 
 # --- разбор кортежа s|g|i|port ---
 tuple_service  = $(word 1,$(subst |, ,$(1)))
@@ -84,11 +94,14 @@ instances: ## расклад инстансов: имя, порт, путь ко
 	@$(foreach t,$(TUPLES),printf "%-28s %-6s %s\n" "$(call tuple_instance,$(t))" "$(call tuple_port,$(t))" "$(call tuple_path,$(t))";)
 
 .PHONY: up
-up: ## поднять весь стенд и дождаться готовности всех инстансов и балансировщиков
+up: prometheus-targets ## поднять весь стенд и дождаться готовности всех инстансов и балансировщиков
 	$(COMPOSE) up -d --build
 	@echo "--- ждём готовности всех инстансов и балансировщиков (до $(WAIT_S)с) ---"
-	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S)
+	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
+		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT)
 	@$(MAKE) --no-print-directory pool
+	# Состояние целей — только сообщение: недоступность наблюдения не должна ронять make up
+	-@$(MAKE) --no-print-directory targets
 
 .PHONY: down
 down: ## остановить стенд (с данными)
@@ -254,7 +267,37 @@ fleet-sessions: ## держит ли флот бюджет: фактически
 service-restart: ## перезапустить инстанс: make service-restart P=service-a-group-1-1
 	$(COMPOSE) restart $(P)
 
+.PHONY: prometheus-targets
+prometheus-targets: ## перегенерировать список целей сбора метрик из ETCD_INSTANCES
+	@mkdir -p $(dir $(TARGETS_FILE))
+	@python3 scripts/targets.py '$(TUPLES)' '$(METRICS_PORT)' '$(TARGETS_FILE)'
+	@echo "цели сбора: $(words $(TUPLES)) инстанс(ов) -> $(TARGETS_FILE)"
+
+.PHONY: check-targets
+check-targets: ## сверить зафиксированный список целей сбора с ETCD_INSTANCES (входит в make test)
+	@mkdir -p $(dir $(TARGETS_FILE))
+	@python3 scripts/targets.py '$(TUPLES)' '$(METRICS_PORT)' '$(TARGETS_FILE).tmp'
+	@if diff -u '$(TARGETS_FILE)' '$(TARGETS_FILE).tmp' > /tmp/targets.diff; then \
+		rm -f '$(TARGETS_FILE).tmp'; \
+		echo "список целей совпадает с ETCD_INSTANCES ($(words $(TUPLES)))"; \
+	else \
+		echo "список целей разошёлся с ETCD_INSTANCES:"; cat /tmp/targets.diff; \
+		echo "перегенерируй: make prometheus-targets"; rm -f '$(TARGETS_FILE).tmp'; exit 1; \
+	fi
+
+.PHONY: targets
+targets: ## состояние целей сбора метрик (нужен поднятый сборщик)
+	@curl -fsS --max-time 10 "http://localhost:$(PROM_PORT)/api/v1/targets?state=active" \
+		| python3 scripts/targets-state.py || \
+		{ echo "сборщик метрик на порту $(PROM_PORT) не отвечает: docker compose ps prometheus"; \
+		  docker compose logs --tail=30 prometheus; exit 1; }
+
 .PHONY: test
-test: ## юнит-тесты сервиса и провизора
+test: ## юнит-тесты сервиса и провизора, проверка целей сбора, конфигурации и правил
 	cd service && mvn -B -q test
 	cd provisioner && mvn -B -q test
+	@$(MAKE) --no-print-directory check-targets
+	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
+	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check rules /etc/prometheus/rules/stand.yml
+	# Правило обязано и молчать на норме, и срабатывать на нарушении: синтаксис этого не проверяет.
+	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus test rules /etc/prometheus/rules/stand.test.yml

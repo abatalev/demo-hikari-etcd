@@ -34,6 +34,7 @@ import org.springframework.stereotype.Component;
 
 import com.example.poolsvc.config.DbProperties;
 import com.example.poolsvc.config.EtcdProperties;
+import com.example.poolsvc.metrics.PoolCounters;
 import com.example.poolsvc.pool.HikariSettings;
 import com.example.poolsvc.pool.InvalidSettingsException;
 import com.example.poolsvc.pool.ManagedPool;
@@ -72,6 +73,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private final HikariSettings defaults;
     private final EtcdProperties properties;
     private final ApplicationEventPublisher eventPublisher;
+    private final PoolCounters counters;
 
     /** Путь ключей этого экземпляра; null, когда источник выключен. */
     private final String path;
@@ -100,6 +102,8 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private final AtomicLong applyCount = new AtomicLong();
     private final AtomicReference<String> lastError = new AtomicReference<>();
     private final AtomicReference<String> notReadyReason = new AtomicReference<>();
+    /** та же причина закрытым набором — для метрик, где свободный текст недопустим */
+    private final AtomicReference<NotReadyCause> notReadyCause = new AtomicReference<>();
     private final AtomicReference<ManagedPool.Outcome> lastOutcome = new AtomicReference<>();
     /** Номер текущей аренды узла регистрации; -1, когда аренды нет. */
     private final AtomicLong registrationLease = new AtomicLong(-1);
@@ -111,11 +115,12 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private volatile Thread publicationThread;
 
     public EtcdPoolConfigSource(ManagedPool pool, DbProperties dbProperties, EtcdProperties properties,
-            ApplicationEventPublisher eventPublisher) {
+            ApplicationEventPublisher eventPublisher, PoolCounters counters) {
         this.pool = pool;
         this.defaults = dbProperties.toSettings();
         this.properties = properties;
         this.eventPublisher = eventPublisher;
+        this.counters = counters;
         if (properties.isEnabled()) {
             this.path = EtcdKeyPath.build(properties.getRoot(), properties.getService(),
                     properties.getGroup(), properties.getInstance());
@@ -141,6 +146,29 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     /** Причина закрытой готовности; null, когда источник выключен или трафик открыт. */
     public String notReadyReason() {
         return notReadyReason.get();
+    }
+
+    /**
+     * Причина закрытой готовности закрытым набором.
+     *
+     * <p>Метрикам нельзя отдавать свободный текст: строка с путём и ошибкой etcd стала бы
+     * безграничным набором значений. Поэтому причина живёт как перечисление, а человеческий
+     * текст собирается из него — иначе текст и метка разъедутся.
+     *
+     * @return {@code null}, когда трафик открыт или источник выключен
+     */
+    public NotReadyCause notReadyCause() {
+        return notReadyCause.get();
+    }
+
+    /** Жива ли подписка: цикл watch запущен, даже если последний снимок не удался. */
+    public boolean isWatchActive() {
+        return running.get();
+    }
+
+    /** Отвечает ли etcd: последний снимок получен, обрыв сбрасывает признак. */
+    public boolean isConnected() {
+        return connected.get();
     }
 
     /** Открыт ли трафик: false, пока конфигурация не получена (при включённом источнике). */
@@ -367,6 +395,13 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
      */
     private void publicationLoop() {
         Integer lastPublished = null;
+        // Аренда, под которой записана последняя публикация. Ключ живёт на аренде узла
+        // регистрации и умирает вместе с ней: после обрыва etcd аренда истекает, ключ исчезает, а
+        // инстанс при переподключении получает новую. Прежняя запись в etcd не пережила
+        // переподключения, поэтому и в памяти её нельзя считать опубликованной — иначе ноль,
+        // однажды записанный, больше не повторится, провижёр навсегда увидит худший случай и не
+        // раздаст место флоту.
+        long publishedUnderLease = -1;
         long version = -1;
         long idleMs = properties.getPublishIdleInterval().toMillis();
         long pollMs = properties.getPublishPollInterval().toMillis();
@@ -381,13 +416,16 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 boolean ceilingChanged = version != previous;
 
                 int debt = pool.runtime().unreleasedConnections();
+                long lease = registrationLease.get();
+                boolean leaseChanged = lease > 0 && lease != publishedUnderLease;
                 Integer publish = DrainDebtPolicy.toPublish(debt, lastPublished, ceilingChanged,
-                        quantum);
+                        leaseChanged, quantum);
                 if (publish != null && publishDebt(publish, debt)) {
                     // Запоминаем только действительно записанное: иначе ранняя неудача (клиент
                     // ещё не создан) навсегда заглушила бы публикацию, а провижёр — видел бы
-                    // худший случай и не выдавал место флоту.
+                    // худший случай и не выдавал бы место флоту.
                     lastPublished = publish;
+                    publishedUnderLease = lease;
                 }
                 if (debt == 0) {
                     // Место освобождено (или сжатия не было) — дальше снова ждём конфигурации.
@@ -574,6 +612,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                         null);
                 lastOutcome.set(rejected.outcome());
                 applyCount.incrementAndGet();
+                counters.configRejected();
                 lastError.set(String.join("; ", rejected.changes()));
                 log.error("[{}] {}: пул остаётся на последних рабочих значениях",
                         reason, rejected.changes().get(0));
@@ -588,6 +627,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             }
         } catch (InvalidSettingsException e) {
             lastError.set(e.getMessage());
+            counters.configRejected();
             log.error("[{}] плохой конфиг из etcd: {}", reason, e.getMessage());
         } catch (RuntimeException e) {
             lastError.set(e.toString());
@@ -616,6 +656,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 log.info("[{}] конфигурация по пути {} получена, открываем трафик", reason, path);
                 eventPublisher.publishEvent(new AvailabilityChangeEvent<>(this, ReadinessState.ACCEPTING_TRAFFIC));
             }
+            notReadyCause.set(null);
             notReadyReason.set(null);
             return;
         }
@@ -630,22 +671,22 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
 
     private void refreshNotReadyReason() {
         if (!properties.isEnabled() || trafficAllowed.get()) {
+            notReadyCause.set(null);
             notReadyReason.set(null);
             return;
         }
-        if (connected.get()) {
-            notReadyReason.set("конфигурация не получена: в пути " + path + " нет распознанных ключей");
-        } else {
-            String err = lastError.get();
-            notReadyReason.set("конфигурация не получена: etcd недоступен"
-                    + (err != null ? " (" + err + ")" : ""));
-        }
+        NotReadyCause cause = connected.get() ? NotReadyCause.NO_CONFIG_KEYS : NotReadyCause.ETCD_UNAVAILABLE;
+        notReadyCause.set(cause);
+        notReadyReason.set(cause.describe(path, lastError.get()));
     }
 
     /** Мусор в значении не блокирует остальные ключи, но обязан быть виден. */
     private void reportProblems(Map<String, String> problems, String reason) {
         problems.forEach((key, problem) -> {
             if (reportedProblems.put(key, problem) == null) {
+                // Считаем каждый ключ один раз: журнал проблем живёт всё время процесса, и счётчик
+                // повторял бы ту же величину на каждом опросе при неизменившемся мусоре.
+                counters.configUnreadable();
                 log.error("[{}] ключ {} проигнорирован: {}", reason, key, problem);
             }
         });
@@ -696,8 +737,41 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 notReadyReason.get());
     }
 
-    public record EtcdStatus(
-            boolean enabled,
+    /**
+     * Причина закрытой готовности.
+     *
+     * <p>Метки метрик берутся из перечисления, а текст для человека собирается из него же — иначе
+     * показание и объяснение разошлись бы при первом же изменении формулировки.
+     */
+    public enum NotReadyCause {
+
+        /** В пути конфигурации нет ни одного распознанного ключа. */
+        NO_CONFIG_KEYS("no_config_keys"),
+        /** Хранилище недоступно: событий удаления не приходило, конфигурация просто не пришла. */
+        ETCD_UNAVAILABLE("etcd_unavailable");
+
+        private final String metricName;
+
+        NotReadyCause(String metricName) {
+            this.metricName = metricName;
+        }
+
+        /** Значение метки причины в метриках. */
+        public String metricName() {
+            return metricName;
+        }
+
+        /** Человеческий текст для API наблюдения. */
+        public String describe(String path, String lastError) {
+            return switch (this) {
+                case NO_CONFIG_KEYS -> "конфигурация не получена: в пути " + path + " нет распознанных ключей";
+                case ETCD_UNAVAILABLE -> "конфигурация не получена: etcd недоступен"
+                        + (lastError != null ? " (" + lastError + ")" : "");
+            };
+        }
+    }
+
+    public record EtcdStatus(            boolean enabled,
             boolean connected,
             List<String> endpoints,
             /** путь ключей этого экземпляра; null, когда источник выключен */

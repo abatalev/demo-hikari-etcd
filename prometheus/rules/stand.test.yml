@@ -1,0 +1,194 @@
+# Проверка правил promtool: правило обязано молчать на штатном состоянии и срабатывать на
+# нарушении. Проверяется в составе make test, поэтому «правило молчит всегда» — тоже падение
+# проверки, а не тихая дырка в наблюдении.
+#
+# Нарушение потолка проверяется на живом стенде (scripts/measure-fleet.sh, 10 Гц), здесь же
+# проверяется, что правило не срабатывает на нормальном переходе и срабатывает на превышении.
+rule_files:
+  - stand.yml
+evaluation_interval: 1m
+tests:
+  - name: "потолок в норме: ни одно правило потолка не срабатывает"
+    interval: 1m
+    input_series:
+      - series: 'provision_fleet_budget_active{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'provision_fleet_nodes_without_share{replica="provisioner-1",service="service-a"}'
+        values: '0x10'
+      - series: 'provision_fleet_growable_free{replica="provisioner-1",service="service-a"}'
+        values: '0x10'
+      - series: 'provision_fleet_stuck_shrink_nodes{replica="provisioner-1",service="service-a"}'
+        values: '0x10'
+      - series: 'provision_fleet_sum_held_estimate{replica="provisioner-1",service="service-a"}'
+        values: '100 125 100 100 100 100 100 100 100 100'
+      - series: 'provision_fleet_sum_held_peak_since_reset{replica="provisioner-1",service="service-a"}'
+        values: '100 125 125 125 125 125 125 125 125 125'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+        values: '50x10'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+        values: '50x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+        values: '50x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+        values: '50x10'
+      - series: 'up{job="provisioner",instance="config-provisioner-1:8080"}'
+        values: '1x10'
+      - series: 'up{job="service",instance="service-a-group-1-1:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      # Оценка и её максимум выше бюджета — не нарушение: так выглядит переход, когда инстанс
+      # ещё не подтвердил освобождение. Правила о них нет, и это проверяется здесь.
+      - eval_time: 9m
+        alertname: FleetCommandsExceedBudget
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: FleetConnectionsExceedBudget
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: FleetNodesWithoutShareWhileRoomFree
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: FleetStuckShrink
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: TargetMissing
+        exp_alerts: []
+
+  - name: "сумма приказанных размеров выше бюджета: ошибка учёта провизёра"
+    interval: 1m
+    input_series:
+      - series: 'provision_fleet_budget_active{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
+        values: '100x5 125x5'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+        values: '60x10'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+        values: '65x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+        values: '60x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+        values: '65x10'
+    alert_rule_test:
+      # Пока сумма в бюджете — молчит. Границу ожидания (for: 30s) не проверяем точно: шаг
+      # evaluation_interval здесь минутный, а в сборщике — 5с, поэтому фиксируем заведомо
+      # наступившее состояние.
+      - eval_time: 5m
+        alertname: FleetCommandsExceedBudget
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: FleetCommandsExceedBudget
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: service-a
+            exp_annotations:
+              summary: Сумма приказанных размеров по сервису выше бюджета
+              description: >-
+                Сервис service-a: сумма приказанных размеров 125 превысила бюджет активного флота.
+                Потолок max_connections защищает базу, поэтому состояние опасное: место выдано сверх
+                бюджета.
+
+  - name: "флот держит в базе больше бюджета: потолок пробит на деле"
+    interval: 1m
+    input_series:
+      - series: 'provision_fleet_budget_active{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      # Учёт провизёра в норме, а база видит больше: место отдано без освобождения.
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+        values: '50x10'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+        values: '50x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+        values: '80x10'
+      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+        values: '50x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FleetCommandsExceedBudget
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: FleetConnectionsExceedBudget
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: FleetConnectionsExceedBudget
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: service-a
+            exp_annotations:
+              summary: Флот держит в базе больше соединений, чем бюджет
+              description: >-
+                Сервис service-a: пулы занимают 130 соединений при бюджете активного флота меньше.
+                Потолок max_connections пробит на деле: либо провизёр отдал место без освобождения,
+                либо соединения держит неучтённый владелец.
+
+  - name: "зависшее сжатие: правило держится на текущем состоянии, а не на истории"
+    interval: 1m
+    input_series:
+      - series: 'provision_fleet_budget_active{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      # Узел сжался и отчитался о неосвобождённом, потом освободил: величина вернулась в ноль.
+      - series: 'provision_fleet_stuck_shrink_nodes{replica="provisioner-1",service="service-a"}'
+        values: '0 0 1 1 1 0 0 0 0 0'
+      - series: 'up{job="provisioner",instance="config-provisioner-1:8080"}'
+        values: '1x10'
+      - series: 'up{job="service",instance="service-a-group-1-1:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: FleetStuckShrink
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: FleetStuckShrink
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: service-a
+            exp_annotations:
+              summary: Неосвобождённое сжатие держится дольше порога
+              description: >-
+                Сервис service-a: у 1 узлов подтверждённое сжатие не уменьшается дольше порога.
+                Место не перераспределяется, флот работает меньше бюджета — это безопасно, но трафик
+                распределён хуже, чем мог бы быть.
+      # Освободилось — правило молчит сразу же. По счётчику предупреждений оно держалось бы
+      # сработавшим ещё 15 минут после этого момента.
+      - eval_time: 9m
+        alertname: FleetStuckShrink
+        exp_alerts: []
+
+  - name: "недоступная цель сбора"
+    interval: 1m
+    input_series:
+      - series: 'up{job="service",instance="service-a-group-1-1:8080"}'
+        values: '1 1 1 0 0 0 0 0 0 0'
+      - series: 'up{job="provisioner",instance="config-provisioner-1:8080"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: service-a-group-1-1:8080
+              job: service
+            exp_annotations:
+              summary: Цель сбора метрик недоступна
+              description: >-
+                Сборщик не достаёт до цели service-a-group-1-1:8080 (задача service) дольше двух
+                минут. Метрики этой цели в графиках и правилах отсутствуют.
+      - eval_time: 9m
+        alertname: TargetMissing
+        exp_alerts: []
