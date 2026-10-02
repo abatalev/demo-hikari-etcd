@@ -10,7 +10,9 @@
 
 Стек: Spring Boot 3.5.16, HikariCP 6.3.3, jetcd 0.8.7, Java 21, Maven, PostgreSQL 16, etcd 3.6.15.
 Сервис (пул, конфиг-источник, API) — `service/`, провизор конфигурации — `provisioner/`.
-Нагрузчик — `loadgen/LoadGen.java`, один файл на голом JDK, без зависимостей.
+Нагрузчик — `loadgen/`, третий самостоятельный Maven-проект на том же `spring-boot-starter-parent`
+(корневого агрегатора в проекте нет, все три собираются независимо). Логика нагрузки в
+`LoadGen.java` не тронута Spring'ом и живёт рядом с точкой входа.
 
 Схема и обзор — [README.md](README.md), подробности — в [docs/](docs/):
 [mechanism.md](docs/mechanism.md) (путь `put` → resize), [api.md](docs/api.md),
@@ -354,6 +356,22 @@ HikariCP после recreate или снятия конфигурации нав
 `make sessions S=<сервис>` в исправной базе показывает только инстансы своего сервиса. Панели
 Grafana не правятся: обе суммируют по `application_name`/`service`, а не по признаку цели сбора,
 поэтому две цели в одной задаче `postgres` не размножают ряды.
+
+**Вывод нагрузчика — это stdout, и в нём не должно быть ничего, кроме отчёта.** `make load-logs`
+показывает этот stdout человеку, а колонки парсятся глазами. Поэтому в `LoadGenApp` жёстко
+заданы `web-application-type=none`, `banner-mode=off` и `logging.level.root=OFF`: Spring Boot печатает
+баннер и сообщения инициализации в тот же поток, и одна лишняя строка оказалась бы мусором в самом
+нужном месте. Проверяется глазами — `docker compose logs loadgen-a`, первая строка после заголовка
+должна быть `[t=  2s]`.
+
+**Тело `LoadGen.java` не переписывается под фреймворк.** Там виртуальные потоки, тайминги и
+формат отчёта; правка этого кода — правка измеряемой величины. Spring-оболочка (`LoadGenApp`,
+`LoadGenRunner`) вызывает `LoadGen.main` и ничего в него не заходит. Единственная правка самого
+`LoadGen` за всю историю — добавленная `package`-декларация, и она обязательна:
+`@SpringBootApplication` в default package не работает (component scan оттуда сканирует весь
+classpath, включая вложенные jar'ы, и падает), а класс из default package невидим из named package.
+Проверяется diff'ом против исходного файла: `git show HEAD~1:loadgen/LoadGen.java | diff - <путь>`
+должен дать ровно две добавленные строки.
 
 ## Подводные камни
 

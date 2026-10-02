@@ -1,3 +1,5 @@
+package ru.hikari.loadgen;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;

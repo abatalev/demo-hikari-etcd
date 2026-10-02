@@ -422,8 +422,8 @@ java -jar target/pool-service-*.jar \
 Нагрузчик тоже запускается локально, без образа:
 
 ```bash
-cd loadgen && javac LoadGen.java
-TARGET=http://localhost:8080 STATUS_TARGET=http://localhost:18081 WORKERS=8 WORK_MS=50 DURATION_S=30 java LoadGen
+cd loadgen && mvn -q package
+TARGET=http://localhost:8080 STATUS_TARGET=http://localhost:18081 WORKERS=8 WORK_MS=50 DURATION_S=30 java -jar target/loadgen.jar
 ```
 
 ### Режим без etcd

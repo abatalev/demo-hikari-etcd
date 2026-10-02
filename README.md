@@ -377,7 +377,8 @@ make targets                     # 13 целей сбора: 8 инстансо�
 сложит два пула в один ряд, а правило потолка промолчит. Ловится это глазами:
 `make sessions S=<сервис>` в исправной базе показывает только инстансы своего сервиса.
 
-Как устроен нагрузчик (`loadgen/LoadGen.java`, один файл на JDK): `WORKERS` виртуальных потоков,
+Как устроен нагрузчик (`loadgen/`, Maven + Spring Boot; логика в `LoadGen.java` не тронута):
+`WORKERS` виртуальных потоков,
 `WORK_MS` — сколько держать коннект в `pg_sleep`, `REPORT_MS` — период отчёта, `DURATION_S=0` —
 крутится до `docker compose stop loadgen-a loadgen-b`. Каждая строка отчёта: rps, p50/p95/max,
 inflight, ошибки + состояние пула + сессии postgres. `TARGET` — куда долбить (`lb-a` у `loadgen-a`,
@@ -439,7 +440,7 @@ service/       Spring Boot 3.5 + HikariCP + jetcd        (mvn test)
   web/         PoolController, TrafficGateFilter (503)
   health/      EtcdConfigHealthIndicator (причина неготовности)
 provisioner/   два провизора с выборами лидера по сервису: сверка+watch, txn put_if_absent, GC ключей
-loadgen/       нагрузчик на голом JDK (TARGET / STATUS_TARGET)
+loadgen/       нагрузчик, Maven + Spring Boot (TARGET / STATUS_TARGET); логика в LoadGen.java
 nginx/         шаблон конфига балансировщика (envsubst: BACKEND_1..4)
 etcd/          образ с etcdctl для ручных правок
 prometheus/    конфигурация сборщика, список целей (из ETCD_INSTANCES), правила (promtool)
