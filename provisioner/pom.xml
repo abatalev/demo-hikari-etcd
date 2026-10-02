@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.example</groupId>
+    <groupId>com.abatalev.demo.etcdhikari</groupId>
     <artifactId>config-provisioner</artifactId>
     <version>0.1.0</version>
     <name>config-provisioner</name>

@@ -59,5 +59,5 @@ provision:
 
 logging:
   level:
-    com.example.provisioner: INFO
+    com.abatalev.demo.etcdhikari.provisor: INFO
     io.etcd.jetcd: WARN

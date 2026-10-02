@@ -83,6 +83,6 @@ pool:
 
 logging:
   level:
-    com.example.poolsvc: INFO
+    com.abatalev.demo.etcdhikari.service: INFO
     com.zaxxer.hikari: INFO
     io.etcd.jetcd: WARN

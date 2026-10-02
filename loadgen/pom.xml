@@ -11,7 +11,7 @@
     <relativePath/>
   </parent>
 
-  <groupId>com.example</groupId>
+  <groupId>com.abatalev.demo.etcdhikari</groupId>
   <artifactId>loadgen</artifactId>
   <version>0.1.0</version>
   <name>loadgen</name>
@@ -39,7 +39,7 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
-          <mainClass>ru.hikari.loadgen.LoadGenApp</mainClass>
+          <mainClass>com.abatalev.demo.etcdhikari.loadgen.LoadGenApp</mainClass>
         </configuration>
       </plugin>
     </plugins>
