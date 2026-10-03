@@ -31,9 +31,14 @@ WAIT_S ?= 120
 # Нагрузка адресуется сервисом, но отдельной переменной: S= обязателен в командах etcd (там
 # сервис выбирает, что править, и молчаливый выбор опасен), а дефолтный S= убрал бы эту проверку.
 LOAD_S ?= $(call tuple_service,$(word 1,$(TUPLES)))
-LOAD_LB ?= $(if $(filter service-a,$(LOAD_S)),lb-a,lb-b)
+# Распределитель один, точек входа две: 80 отдаёт только LOAD_S, 81 — только второй сервис.
+# Порт назван здесь, а не в TARGET по умолчанию для нагрузчика: TARGET адресуется внутри сети
+# compose, где у контейнера lb свои номера, и путать их с портами хоста нельзя.
+LB_TARGET_PORT = $(if $(filter service-a,$(LOAD_S)),80,81)
+LB_HOST_PORT = $(if $(filter service-a,$(LOAD_S)),$(LB_A_PORT),$(LB_B_PORT))
+LOAD_LB ?= lb
 LOAD_INSTANCE ?= $(call tuple_instance,$(word 1,$(foreach t,$(TUPLES),$(if $(filter $(LOAD_S),$(call tuple_service,$(t))),$(t)))))
-TARGET ?= http://$(LOAD_LB)
+TARGET ?= http://$(LOAD_LB):$(LB_TARGET_PORT)
 STATUS_TARGET ?= http://$(LOAD_INSTANCE):8080
 
 # --- список целей сбора метрик ---
@@ -41,6 +46,15 @@ STATUS_TARGET ?= http://$(LOAD_INSTANCE):8080
 # списка инстансов в репозитории не появляется. Файл зафиксирован (сборщик поднимается и без make),
 # а make check-targets ловит расхождение.
 TARGETS_FILE ?= prometheus/targets.json
+# Список бэкендов распределителя выводится из ETCD_INSTANCES тем же способом, что и список целей
+# сбора, и проверяется той же командой в make test. Файл на стенд, а не на сервис: распределитель
+# один, и границу по сервису держит привязка маршрута к своей точке входа. Проверка заодно
+# сверяет, что каждая точка входа из списка есть в traefik/traefik.yml: несовпадение не даёт отказа,
+# а тихо оставляет точку входа без маршрута.
+BACKENDS_FILE ?= traefik/dynamic/fleet.yml
+# Временный файл сверки лежит ВНЕ каталога динамики: этот каталог смонтирован в балансировщик
+# целиком, и лишний файл в нём Traefik попытался бы прочитать как конфигурацию.
+BACKENDS_TMP ?= traefik/fleet.check
 METRICS_PORT ?= 8080
 
 # --- разбор кортежа s|g|i|port ---
@@ -52,6 +66,9 @@ tuple_path     = $(ETCD_ROOT)/services/$(call tuple_service,$(1))/groups/$(call 
 
 # кортеж по имени инстанса (I=...)
 tuple_by_I = $(foreach t,$(TUPLES),$(if $(filter $(I),$(call tuple_instance,$(t))),$(t)))
+# имена сервисов без повторов: список сервисов тоже выводится, поэтому ни одна команда
+# не перечисляет его руками. Порядок — по имени, чтобы порядок кортежей в .env на него не влиял
+services = $(sort $(foreach t,$(1),$(call tuple_service,$(t))))
 # кортежи по сервису (S=...) / группе (G=...)
 tuples_by_S = $(foreach t,$(TUPLES),$(if $(filter $(S),$(call tuple_service,$(t))),$(t)))
 tuples_by_G = $(foreach t,$(TUPLES),$(if $(filter $(G),$(call tuple_group,$(t))),$(t)))
@@ -126,9 +143,9 @@ instances: ## расклад инстансов: имя, порт, путь ко
 	@$(foreach t,$(TUPLES),printf "%-28s %-6s %s\n" "$(call tuple_instance,$(t))" "$(call tuple_port,$(t))" "$(call tuple_path,$(t))";)
 
 .PHONY: up
-up: prometheus-targets ## поднять весь стенд и дождаться готовности всех инстансов и балансировщиков
+up: prometheus-targets balancers ## поднять весь стенд и дождаться готовности всех инстансов и распределителей
 	$(COMPOSE) up -d --build
-	@echo "--- ждём готовности всех инстансов и балансировщиков (до $(WAIT_S)с) ---"
+	@echo "--- ждём готовности всех инстансов и распределителя (до $(WAIT_S)с) ---"
 	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
 		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT_A) $(EXPORTER_PORT_B)
 	@$(MAKE) --no-print-directory pool
@@ -157,7 +174,7 @@ load-logs: ## логи нагрузчика сервиса: make load-logs LOAD_
 
 .PHONY: stress
 stress: ## разовый прогон нагрузки на сервис (DURATION_S по умолчанию 20с): LOAD_S=service-b WORKERS=32 WORK_MS=200 make stress
-	@echo "нагрузка на $(LOAD_S) через $(LOAD_LB), инстанс для сводки: $(LOAD_INSTANCE)"
+	@echo "нагрузка на $(LOAD_S) через $(LOAD_LB):$(LB_TARGET_PORT), инстанс для сводки: $(LOAD_INSTANCE)"
 	$(COMPOSE) run --rm --no-deps \
 		-e TARGET=$(TARGET) -e STATUS_TARGET=$(STATUS_TARGET) \
 		-e WORKERS=$(WORKERS) -e WORK_MS=$(WORK_MS) -e REPORT_MS=$(REPORT_MS) \
@@ -276,7 +293,7 @@ pool: ## сводка по всем инстансам; make pool I=имя — �
 
 .PHONY: work
 work: ## один запрос через балансировщик сервиса: make work LOAD_S=service-b
-	@curl -fsS "http://localhost:$(if $(filter service-a,$(LOAD_S)),$(LB_A_PORT),$(LB_B_PORT))/api/work?ms=100" \
+	@curl -fsS "http://localhost:$(LB_HOST_PORT)/api/work?ms=100" \
 		| python3 -m json.tool
 
 .PHONY: psql
@@ -322,6 +339,31 @@ check-targets: ## сверить зафиксированный список ц�
 		echo "перегенерируй: make prometheus-targets"; rm -f '$(TARGETS_FILE).tmp'; exit 1; \
 	fi
 
+.PHONY: balancers
+balancers: ## перегенерировать список бэкендов распределителя из ETCD_INSTANCES
+	@mkdir -p $(dir $(BACKENDS_FILE))
+	@python3 scripts/balancers.py '$(TUPLES)' '$(BACKENDS_FILE)'
+	@echo "бэкенды распределителя: $(words $(TUPLES)) инстанс(ов), $(words $(call services,$(TUPLES))) сервис(ов) -> $(BACKENDS_FILE)"
+
+.PHONY: check-balancers
+check-balancers: ## сверить зафиксированный список бэкендов с ETCD_INSTANCES (входит в make test)
+	@mkdir -p $(dir $(BACKENDS_FILE)) $(dir $(BACKENDS_TMP))
+	@python3 scripts/balancers.py '$(TUPLES)' '$(BACKENDS_TMP)'
+	@if diff -u '$(BACKENDS_FILE)' '$(BACKENDS_TMP)' > /tmp/balancers.diff; then \
+		rm -f '$(BACKENDS_TMP)'; \
+	else \
+		echo "список бэкендов разошёлся с ETCD_INSTANCES:"; cat /tmp/balancers.diff; \
+		echo "перегенерируй: make balancers"; rm -f '$(BACKENDS_TMP)'; exit 1; \
+	fi
+	@# каждая точка входа из списка обязана быть объявлена в статической конфигурации: иначе
+	@# Traefik не создаст маршрут, и точка входа будет отдавать 404 без всякой ошибки
+	@for ep in $$(grep -oE '\- web-[a-z0-9]+' '$(BACKENDS_FILE)' | grep -oE 'web-[a-z0-9]+' | sort -u); do \
+		grep -q "^  $$ep:" traefik/traefik.yml || \
+			{ echo "точка входа $$ep есть в списке бэкендов, но не объявлена в traefik/traefik.yml"; \
+			  exit 1; }; \
+	done
+	@echo "список бэкендов совпадает с ETCD_INSTANCES ($(words $(TUPLES)) инстанс(ов))"
+
 .PHONY: targets
 targets: ## состояние целей сбора метрик (нужен поднятый сборщик)
 	@curl -fsS --max-time 10 "http://localhost:$(PROM_PORT)/api/v1/targets?state=active" \
@@ -334,6 +376,7 @@ test: ## юнит-тесты сервиса и провизора, провер�
 	cd service && mvn -B -q test
 	cd provisioner && mvn -B -q test
 	@$(MAKE) --no-print-directory check-targets
+	@$(MAKE) --no-print-directory check-balancers
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check rules /etc/prometheus/rules/stand.yml
 	# Правило обязано и молчать на норме, и срабатывать на нарушении: синтаксис этого не проверяет.

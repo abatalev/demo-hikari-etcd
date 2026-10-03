@@ -294,64 +294,45 @@ services:
     ports:
       - "18088:8080"
 
-  # --- балансировка входящего трафика: граница по сервису (lb-a -> service-a, lb-b -> service-b) ---
-  lb-a:
-    image: nginx:1.27-alpine
+  # --- балансировка входящего трафика: одна точка входа на сервис (web-a -> service-a, web-b -> service-b) ---
+  #
+  # Список бэкендов НЕ перечислен здесь, а лежит в traefik/dynamic/fleet.yml и выводится из
+  # ETCD_INSTANCES командой make balancers (make up вызывает её перед стартом, make check-balancers
+  # сверяет, обе — в make test). Копия списка инстансов, написанная руками, разъезжалась бы с .env
+  # молча: nginx резолвил такие адреса один раз при старте и после пересоздания инстансов
+  # продолжал слать запросы по старым.
+  #
+  # Процесс один, точек входа две: web-a обслуживает только service-a, web-b — только service-b.
+  # Отдельные процессы ничего не добавляли — у lb-a и lb-b составы бэкендов не пересекались,
+  # поэтому падение одного не отправляло трафик в другой, а просто оставляло сервис без входа.
+  # depends_on на инстансы НЕ нужен: адрес, которого ещё нет, Traefik переносит и подхватывает
+  # сам, когда инстанс появится, поэтому ждать готовности всех восьми не требуется.
+  lb:
+    image: traefik:v3.5
     volumes:
-      - ./nginx/lb.conf.template:/etc/nginx/templates/default.conf.template:ro
-    environment:
-      BACKEND_1: service-a-group-1-1:8080
-      BACKEND_2: service-a-group-1-2:8080
-      BACKEND_3: service-a-group-2-1:8080
-      BACKEND_4: service-a-group-2-2:8080
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # Каталогом, а не файлом: слежение за файлом при смонтированном файле не работает — ядро не
+      # доставляет события файловой системы внутрь контейнера по файловому bind-mount, и перечитывание
+      # не наступает никогда. Проверено: правка fleet.yml на месте (и заменой файла, и записью поверх)
+      # не меняла маршруты, пока каталог не смонтирован целиком.
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    mem_limit: 256m
     ports:
       - "${LB_A_PORT:-8080}:80"
-    # nginx резолвит имена бэкендов при старте и умирает, если DNS-имя ещё не существует:
-    # стартуем только после того, как все четыре инстанса прошли readiness-healthcheck.
-    depends_on:
-      service-a-group-1-1:
-        condition: service_healthy
-      service-a-group-1-2:
-        condition: service_healthy
-      service-a-group-2-1:
-        condition: service_healthy
-      service-a-group-2-2:
-        condition: service_healthy
+      - "${LB_B_PORT:-8081}:81"
+    # /ping — живость самого распределителя. Готовность к маршрутизации им не проверяется:
+    # /ping отвечает 200 и при нуле бэкендов, а ждать надо именно маршрут (scripts/wait-ready.sh).
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/healthz"]
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 5s
       timeout: 3s
       retries: 20
 
-  lb-b:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./nginx/lb.conf.template:/etc/nginx/templates/default.conf.template:ro
-    environment:
-      BACKEND_1: service-b-group-1-1:8080
-      BACKEND_2: service-b-group-1-2:8080
-      BACKEND_3: service-b-group-2-1:8080
-      BACKEND_4: service-b-group-2-2:8080
-    ports:
-      - "${LB_B_PORT:-8081}:80"
-    depends_on:
-      service-b-group-1-1:
-        condition: service_healthy
-      service-b-group-1-2:
-        condition: service_healthy
-      service-b-group-2-1:
-        condition: service_healthy
-      service-b-group-2-2:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  # Нагрузка на каждую базу: своя точка на свой балансировщик. Две реплики вместо списка целей
-  # в одной — намеренно: у каждой своя гистограмма задержек и своя строка итога, и отчёты двух
-  # прогонов не смешивают две базы (LoadGen.java при этом не меняется).
+  # Нагрузка на каждую базу: своя точка на свою точку входа балансировщика. Две реплики вместо
+  # списка целей в одной — намеренно: у каждой своя гистограмма задержек и своя строка итога, и
+  # отчёты двух прогонов не смешивают две базы (LoadGen.java при этом не меняется).
+  # TARGET адресует балансировщик по порту: 80 обслуживает service-a, 81 — service-b.
   loadgen-a:
     <<: *loadgen
     depends_on:
@@ -360,7 +341,7 @@ services:
     environment:
       <<: *loadgen-env
       # TARGET — через балансировщик; STATUS_TARGET — стабильный инстанс для сводки пула
-      TARGET: http://lb-a
+      TARGET: http://lb:80
       STATUS_TARGET: http://service-a-group-1-1:8080
 
   loadgen-b:
@@ -370,7 +351,7 @@ services:
         condition: service_healthy
     environment:
       <<: *loadgen-env
-      TARGET: http://lb-b
+      TARGET: http://lb:81
       STATUS_TARGET: http://service-b-group-1-1:8080
 
   # --- наблюдение: сборщик метрик, сборщик метрик базы, витрина ---
