@@ -492,12 +492,6 @@ final class ProvisioningWorker implements Runnable {
                     owner.metrics().commandShrink();
                 }
             }
-            if (full && !tree.configPrefixes.contains(prefix)) {
-                // Префикса ещё нет: инстанс ещё не обслуживался, и стартовые ключи ему нужны.
-                // Ставим их только когда доля действительно выдана, а не пока ждём освобождения.
-                ensureKey(c, prefix, "connectionTimeoutMs",
-                        String.valueOf(owner.properties().getConnectionTimeoutMs()), instance);
-            }
         }
 
         // Избыток (доля не досталась), холод (R=0) и осиротевшие префиксы конфигурации — одинаково
@@ -782,29 +776,6 @@ final class ProvisioningWorker implements Runnable {
         }
         log.debug("пересчёт: {} maximumPoolSize уже {}", hikariPrefix, size);
         return 0;
-    }
-
-    /** Обеспечение стартового ключа инстанса (каждый — атомарно, «ключа нет → put»). */
-    private void ensureKey(Client c, String hikariPrefix, String name, String value, String instance)
-            throws Exception {
-        ByteSequence key = ConfigProvisioner.bs(hikariPrefix + name);
-        TxnResponse resp = c.getKVClient().txn()
-                .If(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.createRevision(0)))
-                .Then(Op.put(key, ConfigProvisioner.bs(value), PutOption.DEFAULT))
-                .commit()
-                .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
-        if (resp.isSucceeded()) {
-            log.info("провижининг: положен ключ {}={}",
-                    key.toString(StandardCharsets.UTF_8), value);
-            owner.mechanism().event("etcd.fleet.write.startup_key", b -> b
-                    .setAttribute("service", service)
-                    .setAttribute("node", instance)
-                    .setAttribute("etcd.key", key.toString(StandardCharsets.UTF_8))
-                    .setAttribute("etcd.value", value));
-        } else {
-            log.debug("провижининг: ключ {} уже существует, не трогаю",
-                    key.toString(StandardCharsets.UTF_8));
-        }
     }
 
     /** Удаление всего префикса конфигурации инстанса: ключи провижинера и добавленные вручную. */

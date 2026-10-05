@@ -28,9 +28,10 @@ import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 /**
  * DataSource поверх HikariCP, который никогда не пересоздаётся "просто так".
  *
- * <p>Изменения конфигурации из etcd применяются на живой пул через {@link HikariConfigMXBean}
- * (maximumPoolSize/minimumIdle/timeouts). Полное пересоздание — только когда поменялась
- * "целевая" часть конфига (jdbcUrl/логин/пароль/имя пула), которую MBean менять не умеет.
+ * <p>Из etcd приходит только размер, он применяется на живой пул через {@link HikariConfigMXBean}.
+ * Пересоздание — единственный выход из закрытого состояния: пул сняли нулевым размером, пришла
+ * ненулевая доля. Сменить цель соединения (jdbcUrl/логин/пароль/имя пула) на живом пуле нечем:
+ * она приходит из локальной конфигурации процесса, а MBean её всё равно не принимает.
  *
  * <p>Размер пула задаётся только конфигурацией из etcd: локальный дефолт максимума 0, и пул не
  * создаётся, пока не пришёл первый конфиг. Целевой максимум 0 (резерв холодной группы, снятие
@@ -154,7 +155,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
         HikariSettings.Normalized startup = defaults.normalize();
         startup.warnings().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
         if (startup.settings().maximumPoolSize() > 0) {
-            create(startup.settings(), "startup");
+            create(startup.settings(), "startup", false);
         } else {
             log.info("локальный максимум пула = 0: пул не создан, размер придёт из конфигурации etcd");
             lastReason.set("startup: пула нет (размер 0, ждём конфигурацию из etcd)");
@@ -245,25 +246,24 @@ public class ManagedPool implements DataSource, AutoCloseable {
         if (current == null) {
             // Пула ещё нет (старт с локальным максимумом 0): первый принятый конфиг создаёт его.
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
-            create(target, reason);
+            create(target, reason, false);
             count(c -> c.configApplied());
             return new ApplyResult(Outcome.CREATED, List.of(), applied.get());
         }
 
         HikariDataSource ds = dataSource.get();
-        boolean targetChanged = !current.sameTarget(target);
-        if (targetChanged || ds == null) {
-            // Смена цели (jdbcUrl/креды/имя) MBean не умеет — только пересоздание. ds == null бывает
-            // после закрытия (память о последнем конфиге остаётся в applied) — поднимаем пул заново.
+        if (ds == null) {
+            // Пул был закрыт (нулевой целевой размер), память о последнем конфиге осталась в applied:
+            // поднимаем пул заново. Это единственный путь пересоздания: цель соединения (jdbcUrl,
+            // креды, имя пула) приходит только из локальной конфигурации, изменить её на живом пуле
+            // нечем, а MBean такие параметры всё равно не меняет.
             List<String> changes = current.diff(target);
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
-            create(target, reason);
-            if (targetChanged && ds != null) {
-                count(c -> c.recreated());
-            }
+            create(target, reason, true);
+            recreateCount.incrementAndGet();
+            count(c -> c.recreated());
             count(c -> c.configApplied());
-            return new ApplyResult(targetChanged && ds != null ? Outcome.RECREATED : Outcome.CREATED,
-                    changes, applied.get());
+            return new ApplyResult(Outcome.RECREATED, changes, applied.get());
         }
 
         List<String> changes = current.diff(target);
@@ -473,16 +473,19 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     /**
-     * Создание пула — либо первого, либо нового поколения вместо старого.
+     * Создание пула — либо первого, либо нового поколения вместо снятого.
      *
-     * <p>Пересоздание отдельным событием механизма: смена цели (jdbcUrl/креды/имя) единственный
-     * повод, при котором соединения уходят насильно, и именно это место разбора «куда делись
-     * соединения». Прежнее поколение дренируется здесь же, поэтому время события включает дренаж.
+     * <p>Предусловие: пула нет, {@link #dataSource} — {@code null}. Все три вызова это гарантируют
+     * (старт, первый принятый конфиг при локальном максимуме 0, ненулевая доля после снятия), и
+     * закрывать тут нечего: дренаж живого пула — дело {@link #closePool} и {@link #close()}.
+     *
+     * <p>{@code recreation} различает первое создание и подъём после снятия конфигурации: разные
+     * имена событий механизма и разная строка в журнале, потому что разбор «куда делись соединения»
+     * смотрит именно на второй случай.
      */
-    private void create(HikariSettings settings, String reason) {
+    private void create(HikariSettings settings, String reason, boolean recreation) {
         int previousGeneration = generation.get();
-        boolean replaced = dataSource.get() != null;
-        spans.runQuietly(replaced ? "pool.recreate" : "pool.create", b -> b
+        spans.runQuietly(recreation ? "pool.recreate" : "pool.create", b -> b
                 .setAttribute("config.reason", reason)
                 .setAttribute("pool.name", settings.poolName())
                 .setAttribute("pool.max", settings.maximumPoolSize())
@@ -490,10 +493,10 @@ public class ManagedPool implements DataSource, AutoCloseable {
                 .setAttribute("pool.generation.from", previousGeneration)
                 .setAttribute("pool.generation.to", previousGeneration + 1)
                 .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
-                () -> createPool(settings, reason, previousGeneration));
+                () -> createPool(settings, reason, recreation));
     }
 
-    private void createPool(HikariSettings settings, String reason, int previousGeneration) {
+    private void createPool(HikariSettings settings, String reason, boolean recreation) {
         HikariConfig config = new HikariConfig();
         config.setPoolName(settings.poolName());
         config.setJdbcUrl(settings.jdbcUrl());
@@ -516,33 +519,22 @@ public class ManagedPool implements DataSource, AutoCloseable {
             config.setMetricsTrackerFactory(eventMetrics);
         }
 
-        HikariDataSource previous = dataSource.get();
         HikariDataSource fresh = new HikariDataSource(config);
 
         dataSource.set(fresh);
         applied.set(settings);
         generation.incrementAndGet();
-        if (previous != null) {
-            recreateCount.incrementAndGet();
-            // Старое поколение дренируется уже после подмены ссылки: его соединения ещё открыты
-            // и обязаны попадать в наблюдение вместе с новыми.
-            beginDrain(previous, previousGeneration);
-            try {
-                closeQuietly(previous, "recreate");
-            } finally {
-                endDrain();
-            }
-        }
         createdAt.set(System.currentTimeMillis());
         lastChangeAt.set(System.currentTimeMillis());
         lastReason.set(reason);
 
-        if (previous == null) {
+        if (recreation) {
+            log.info("[{}] HikariCP '{}' создан заново после снятия конфигурации: max={} minIdle={}",
+                    reason, settings.poolName(), settings.maximumPoolSize(), settings.minimumIdle());
+        } else {
             log.info("[{}] HikariCP '{}' создан: jdbc={} user={} max={} minIdle={} connectionTimeout={}ms",
                     reason, settings.poolName(), settings.jdbcUrl(), settings.username(),
                     settings.maximumPoolSize(), settings.minimumIdle(), settings.connectionTimeoutMs());
-        } else {
-            log.info("[{}] HikariCP '{}' пересоздан (сменилась цель: jdbcUrl/креды/имя)", reason, settings.poolName());
         }
     }
 
@@ -567,8 +559,8 @@ public class ManagedPool implements DataSource, AutoCloseable {
      * Поэтому перед close() вытесняем idle и ждём (недолго), пока доработают активные.
      *
      * <p>Ожидание — событие механизма: по нему видно, сколько соединений держал уходящий пул и
-     * успел ли дренаж. Признак {@code pool.drain.cause} различает поводы: пересоздание, снятие
-     * конфигурации, остановка процесса — трафик они ломают по-разному.
+     * успел ли дренаж. Признак {@code pool.drain.cause} различает поводы: снятие конфигурации и
+     * остановка процесса — трафик они ломают по-разному.
      */
     private void drain(HikariDataSource ds, String cause) {
         if (drainTimeout.isZero() || ds.isClosed()) {

@@ -70,6 +70,13 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EtcdPoolConfigSource.class);
 
+    /**
+     * Ключи, значение которых не показывается в статусе источника ни при каких условиях.
+     * Сейчас из etcd приходят только размер и минимум, поэтому список пуст по сути: учётные данные
+     * берутся локально. Оставлен как защита от значения, которое в etcd всё же появится.
+     */
+    private static final Set<String> MASKED_KEYS = Set.of("password");
+
     private final ManagedPool pool;
     private final HikariSettings defaults;
     private final EtcdProperties properties;
@@ -733,7 +740,10 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
         for (Map.Entry<String, String> entry : keys.entrySet()) {
             String key = entry.getKey();
             String shortKey = EtcdKeys.shortKey(key, path);
-            String val = EtcdKeys.PASSWORD.equals(shortKey) ? "***" : entry.getValue();
+            // Ключа password в etcd больше не бывает: из хранилища читаются только размер и минимум,
+            // учётные данные приходят локально. Маскирование оставлено — это защита от значения,
+            // которое в etcd всё же появится, и стоит она одну строку.
+            String val = MASKED_KEYS.contains(shortKey) ? "***" : entry.getValue();
             view.put(shortKey, val);
         }
         return new EtcdStatus(

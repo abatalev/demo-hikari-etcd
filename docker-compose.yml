@@ -29,7 +29,10 @@ x-service: &service-base
     # true = после расширения пула сразу открыть нужное число коннектов (демо).
     # false = как в проде: коннекты добираются по мере надобности.
     POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
-    # сколько ждать активные соединения при пересоздании пула (смена jdbcUrl/кредов)
+    # Таймауты приходят только отсюда, из etcd не читаются: правка требует перезапуска инстанса.
+    # Короткое значение — способ воспроизвести 503 перегруза (насыщенный пул не берёт коннект).
+    POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
+    # сколько ждать активные соединения перед закрытием пула (нулевой размер, остановка)
     POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
     ETCD_ENDPOINTS: http://etcd:2379
     ETCD_ROOT: ${ETCD_ROOT:-/config}
@@ -88,7 +91,6 @@ x-provisioner: &provisioner
     PROV_ACTIVE_MIN_CONNECTIONS: ${PROV_ACTIVE_MIN_CONNECTIONS:-1}
     PROV_INACTIVE_MAX_CONNECTIONS: ${PROV_INACTIVE_MAX_CONNECTIONS:-1}
     PROV_MAX_SHARE: ${PROV_MAX_SHARE:-200}
-    PROV_CONNECTION_TIMEOUT_MS: ${PROV_CONNECTION_TIMEOUT_MS:-3000}
     PROV_LEADER_TTL: ${PROV_LEADER_TTL:-10s}
     # Доля запросов, попадающих в трассу: 1.0 — всё, меньше — меньше помехи.
     OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}

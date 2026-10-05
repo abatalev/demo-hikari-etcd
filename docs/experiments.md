@@ -8,7 +8,25 @@
 
 Все цифры сняты с живого стенда (`make up`, PostgreSQL 16, etcd 3.6.15, ноутбук без тюнинга).
 Стенд: `loadgen` с 4 постоянными потоками по 25мс, если не указано иное. Пул = 10 по умолчанию,
-`connectionTimeoutMs` = 3000 (его кладёт config-provisioner), `eager-fill-on-resize=true`.
+`eager-fill-on-resize=true`.
+
+**Таймаут ожидания соединения в замерах ниже — 3000 мс.** Сейчас дефолт стенда 30000
+(`POOL_CONNECTION_TIMEOUT_MS` в `.env`), и 3000 больше не клал config-provisioner: таймауты
+приходят только из локальной конфигурации процесса. Чтобы повторить замеры с коротким таймаутом,
+поставьте его до подъёма и перезапустите инстансы:
+
+```bash
+sed -i 's/^POOL_CONNECTION_TIMEOUT_MS=.*/POOL_CONNECTION_TIMEOUT_MS=3000/' .env
+docker compose up -d
+```
+
+Значения по умолчанию дадут те же порядки величин, но меньше отказов по таймауту и более длинный
+хвост: с 3000 мс насыщенный пул отказывает быстро, с 30000 мс клиент дольше ждёт.
+
+> Историческая справка: до сужения etcd до одного ключа размера `connectionTimeoutMs=3000` клал
+> config-provisioner стартовым ключом, а `jdbcUrl`, `username`, `password` и `poolName` читались из
+> etcd (см. ниже снятый сценарий смены цели). Теперь эти величины приходят из локальной
+> конфигурации процесса, а примеры с правкой таких ключей в etcd больше не воспроизводятся.
 
 ## Рост и сжатие пула на живом сервисе
 
@@ -61,7 +79,8 @@ WORKERS=32 WORK_MS=200 DURATION_S=20 make stress
 
 Читается однозначно: 3 коннекта × (1000/200мс) = ~15 rps — ровно то, что показывает нагрузчик.
 `waiting=33-34` значит, что почти все 32 потока стоят в очереди. `err` растёт монотонно (16 → 35):
-это запросы, отвалившиеся по `connectionTimeoutMs=3000`, они не повторяются и портят средние
+это запросы, отвалившиеся по таймауту ожидания соединения (в этом замере 3000 мс), они не
+повторяются и портят средние
 (`p50=1397ms`, `max=5698ms` — хвост из ожидания плюс таймауты).
 
 Показательно, что `pg: n/a ("пропущено: свободных коннектов в пуле нет (active=3)")` — интроспекция
@@ -114,27 +133,36 @@ hikari - [etcd@9 [maximumPoolSize=put]] конфиг отклонён (maximumPo
 
 ### `maximumPoolSize = banana` — игнорируется только этот ключ
 
-Подряд положены `maximumPoolSize=banana` и `connectionTimeoutMs=1500`:
+Подряд положены `maximumPoolSize=banana` и `minimumIdle=5` на `service-a-group-1-1`
+(размер до этого был 25):
 
 ```
-etcd.EtcdPoolConfigSource - [etcd@10 ...] ключ maximumPoolSize проигнорирован: 'banana' — ожидалось целое число, взято значение по умолчанию
-hikari - [etcd@10 ...] пул 'pool-service' обновлён на лету: maximumPoolSize: 30 -> 10, minimumIdle: 30 -> 10
+etcd.EtcdPoolConfigSource - [etcd@4073 [maximumPoolSize=put]] ключ maximumPoolSize проигнорирован: 'banana' — ожидалось целое число, взято значение по умолчанию
+hikari - [etcd@4073 [maximumPoolSize=put]] пул 'service-a-group-1-1' закрыт: размер 25 -> 0, активные соединения дренированы
+hikari - [etcd@4075 [maximumPoolSize=put]] нормализация конфига: minimumIdle=30 > maximumPoolSize=25 -> понижен до 25
+hikari - [etcd@4075 [maximumPoolSize=put]] HikariCP 'service-a-group-1-1' создан заново после снятия конфигурации: max=25 minIdle=25
+hikari - [etcd@4077 [minimumIdle=put]] пул 'service-a-group-1-1' обновлён на лету: minimumIdle: 25 -> 5 | now: max=25 minIdle=5 total=25
 ```
 
 ```json
-{"pool": {"maximumPoolSize": 10},
- "config": {"connectionTimeoutMs": 1500},
- "etcd": {"problems": {"maximumPoolSize": "'banana' — ожидалось целое число, взято значение по умолчанию"},
-           "lastOutcome": "RESIZED"}}
+{"pool_maximum_pool_size": 25, "pool_minimum_idle": 5, "pool_etcd_problems": 1, "pool_recreate_total": 1}
 ```
 
-Соседний ключ применился (`connectionTimeoutMs` 3000 → 1500), битый ключ откатился на дефолт 10.
-`lastOutcome` при этом `RESIZED`, а не `REJECTED` — конфиг в целом рабочий.
+Соседний ключ применился целиком (`minimumIdle` 25 → 5), битый ключ не блокировал его. Исход
+применения — не `REJECTED`, конфиг в целом рабочий.
+
+**Что стоит знать про мусорный максимум.** Нечитаемое значение отбрасывается целиком, и тогда
+максимум берётся из локальной конфигурации, а она жёстко 0 («пула нет до первого конфига»).
+На стенде это значит `пул закрыт: размер 25 -> 0` и окно в 503 на 25 мс (в замере `etcd@4073` →
+`etcd@4075`): вслед за сервисным событием провижёр приводит `maximumPoolSize` к доле (управляемый
+ключ) и пул поднимается заново — растут `pool_generation` и `pool_recreate_total`. Гейт трафика
+при этом не закрывается: ключ в etcd есть, он просто нечитаем, а снятие конфигурации происходит
+по `DELETE` ключа.
 
 **Особенность, о которой стоит знать:** `etcd.problems` не очищается, когда значение чинят.
-Проверено: после `put maximumPoolSize=12` (нормальное число) поле продолжало показывать
-старую запись про `banana`. Смотрите на `config` / `pool.maximumPoolSize`, чтобы понять текущее
-состояние, а `problems` — как журнал: «что-то когда-то было плохо». Обнуляется только рестартом.
+Проверено: после `put maximumPoolSize=12` (нормальное число) гейдж `pool_etcd_problems` продолжал
+показывать `1`. Смотрите на `pool_maximum_pool_size`, чтобы понять текущее состояние, а
+`pool_etcd_problems` — как журнал: «что-то когда-то было плохо». Обнуляется только рестартом.
 
 ### Опечатка `maxPoolSize = 8`
 
@@ -150,30 +178,52 @@ WARN ... в etcd есть неизвестный ключ 'maxPoolSize' (пре�
 `etcdctl del maximumPoolSize` → пул вернулся к 10 (локальный дефолт), `revision` выросла до 13.
 `DELETE` в etcd равнозначен «вернуться к дефолту», а не «запретить ключ».
 
-## Смена цели: `jdbcUrl` → пересоздание с дренажем
+## Пересоздание пула: выход из нулевого размера
+
+Пул пересоздаётся ровно в одном случае: его сняли (нулевым размером или снятием конфигурации),
+а пришла ненулевая доля. Смена цели соединения через etcd больше невозможна — см. историческую
+справку в начале документа.
 
 ```bash
-make set-size SIZE=10   # вернуть размер
-docker compose run --rm --no-deps etcdctl put "$PREFIX/jdbcUrl" \
-  "jdbc:postgresql://postgres:5432/demo?connectTimeout=5"
+# холодный флот: неактивная группа при R=0 теряет конфигурацию целиком
+make set-inactive-max-connections SIZE=0 S=service-a
+make set-group-active G=group-2 ACTIVE=false    # конфигурация снята, пул закрыт с дренажом
+make set-group-active G=group-2 ACTIVE=true     # доля вернулась: пул создан заново
 ```
 
+Снятие конфигурации (журнал `service-a-group-2-2`):
+
 ```
-hikari - [etcd@15 [jdbcUrl=put]] старый пул 'pool-service' закрывается: ждём 4 активных соединений (до PT3S)
-hikari - [etcd@15 [jdbcUrl=put]] HikariCP 'pool-service' пересоздан (сменилась цель: jdbcUrl/креды/имя)
+hikari - старый пул 'service-a-group-2-2' закрывается: ждём 1 активных соединений (до PT3S)
+hikari - [etcd@3950 [maximumPoolSize=delete]] пул 'service-a-group-2-2' закрыт: размер 25 -> 0, активные соединения дренированы
+```
+
+Возврат доли — через 12 секунд:
+
+```
+hikari - [etcd@3974 [maximumPoolSize=put]] нормализация конфига: idleTimeout не применим: minimumIdle == maximumPoolSize
+hikari - [etcd@3974 [maximumPoolSize=put]] HikariCP 'service-a-group-2-2' создан заново после снятия конфигурации: max=25 minIdle=25
 ```
 
 ```json
-{"pool": {"generation": 2, "recreationCount": 1, "maximumPoolSize": 10},
- "etcd": {"lastOutcome": "RECREATED", "keys": {"jdbcUrl": "jdbc:postgresql://postgres:5432/demo?connectTimeout=5"}}}
+{"pool_generation": 2, "pool_recreate_total": 1, "pool_maximum_pool_size": 25}
 ```
 
-Дренаж занял ~70мс при 4 активных соединениях (4 потока нагрузчика были в `pg_sleep(25ms)`) —
-все доработали естественно, до принудительного закрытия дело не дошло. `generation` 1 → 2 — единственный
-параметр, по которому видно, что пул пересоздавался.
+```json
+// трасса, node = service-a-group-2-2
+{"name": "pool.recreate", "pool.generation.from": 1, "pool.generation.to": 2}
+{"name": "pool.drain", "pool.drain.cause": "config_removed", "pool.drain.active": 1,
+ "pool.drain.left": 0, "pool.drain.timeout_ms": 3000}
+```
 
-Заодно проверено, что `put` того же самого `jdbcUrl` даёт `UNCHANGED` и `generation` не растёт:
-сравнение идёт по значению, а не по факту события.
+`pool_generation` 1 → 2, `pool_recreate_total` 0 → 1 и событие трассы `pool.recreate` — признаки, по
+которым видно, что пул пересоздавался; исход применения при этом `RECREATED`. Значения таймаутов в
+этих строках не печатаются: цель соединения и таймауты приходят из локальной конфигурации, из etcd
+они больше не приходят.
+
+Дренаж на снятии обязателен, и по событию видно, что он сработал: `pool.drain.active=1` — уходящий
+пул держал одно активное соединение, `pool.drain.left=0` — оно доработало естественно, до
+принудительного закрытия дело не дошло.
 
 ## Падение и подъём etcd
 
@@ -346,10 +396,10 @@ overshoot был не виден. Само сравнение с `max_connection
 | 32×200мс, пул 3 | `waiting=33`, `p50=1397ms`, rps ~15, 49 ошибок по таймауту |
 | пул 3 → 30 под нагрузкой | rps 15 → 139, `p50` 1397 → 228мс, `waiting` 34 → 6, ошибок больше не было |
 | `maximumPoolSize=0` | `REJECTED`, пул на прежнем размере |
-| `maximumPoolSize=banana` | только этот ключ откатился на дефолт, `connectionTimeoutMs` применился |
+| `maximumPoolSize=banana` | ключ отброшен → максимум стал локальным 0 → пул закрыт; провижёр через 18мс вернул долю, пул поднялся заново; `minimumIdle` применился |
 | опечатка `maxPoolSize` | warning, на конфиг не повлиял |
 | удаление ключа | возврат к локальному дефолту |
-| смена `jdbcUrl` | `RECREATED`, дренаж 70мс, `generation` 1 → 2 |
+| снятие конфигурации и возврат доли | `RECREATED`, дренаж на снятии, `generation` 1 → 2, `pool_recreate_total` 0 → 1 |
 | etcd лежит 20с | пул жив, `connected=false`, автовосстановление за ~8с |
 | переход бюджета под нагрузкой | пик суммы флота = N (было 102…114), место раздаётся по одному |
 | тот же переход, оценка занятости провизёра | `занято 196` при `реально 100` — худший случай, не превышение |
@@ -377,7 +427,7 @@ overshoot был не виден. Само сравнение с `max_connection
 и `psql` получает `FATAL: sorry, too many clients already`. Значит, превышение диагностируется по
 журналу экземпляра и по `total < maximumPoolSize`, а не по возможности подключиться к базе.
 
-Таймаут ожидания соединения (`connectionTimeoutMs = 3000`) картину сглаживает: соединения добираются
+Таймаут ожидания соединения (в этом замере 3000 мс) картину сглаживает: соединения добираются
 частями по мере надобности, и без нагрузки флот может долго не дойти до потолка. Под нагрузкой
 отказ виден сразу — `eager fill: добили только часть пула (… total=29, active=29, idle=0, waiting=4)`,
 и `pool_connections` оседает ниже приказанного. Готовность инстансов при этом сохраняется: потеря
@@ -430,7 +480,7 @@ make set-active-max-connections SIZE=100 S=service-a
 
 ```bash
 P=/config/pool-service/hikari
-for k in maximumPoolSize minimumIdle maxPoolSize jdbcUrl; do
+for k in maximumPoolSize minimumIdle maxPoolSize; do
   docker compose run --rm --no-deps etcdctl del "$P/$k"
 done
 docker compose run --rm --no-deps etcdctl put "$P/maximumPoolSize" 10

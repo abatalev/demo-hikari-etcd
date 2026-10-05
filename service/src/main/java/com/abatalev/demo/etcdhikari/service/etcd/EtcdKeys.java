@@ -11,29 +11,23 @@ import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
  * Разбор ключей etcd в настройки пула. Отдельный класс, чтобы это можно было
  * покрыть тестами без поднятия etcd.
  *
- * <p>Схема ключей (путь собирается из сегментов экземпляра, см. {@link EtcdKeyPath}):
+ * <p>Хранилище конфигурации владеет только размером пула. Схема ключей (путь собирается из
+ * сегментов экземпляра, см. {@link EtcdKeyPath}):
  * <pre>
  *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/maximumPoolSize = 20
  *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/minimumIdle     = 5
- *   /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/connectionTimeoutMs = 3000
  * </pre>
+ *
+ * <p>Цель соединения (адрес базы, учётные данные, имя пула) и таймауты сюда не входят: они
+ * приходят только из локальной конфигурации процесса, поэтому менять их на живом пуле нечем.
+ * Ключ вне перечня — опечатка, и он попадает в {@link #unknownKeys(Map, String)}.
  */
 public final class EtcdKeys {
 
     public static final String MAX_POOL_SIZE = "maximumPoolSize";
     public static final String MIN_IDLE = "minimumIdle";
-    public static final String CONNECTION_TIMEOUT = "connectionTimeoutMs";
-    public static final String IDLE_TIMEOUT = "idleTimeoutMs";
-    public static final String MAX_LIFETIME = "maxLifetimeMs";
-    public static final String VALIDATION_TIMEOUT = "validationTimeoutMs";
-    public static final String LEAK_DETECTION = "leakDetectionThresholdMs";
-    public static final String JDBC_URL = "jdbcUrl";
-    public static final String USERNAME = "username";
-    public static final String PASSWORD = "password";
-    public static final String POOL_NAME = "poolName";
 
-    public static final Set<String> ALL = Set.of(MAX_POOL_SIZE, MIN_IDLE, CONNECTION_TIMEOUT, IDLE_TIMEOUT,
-            MAX_LIFETIME, VALIDATION_TIMEOUT, LEAK_DETECTION, JDBC_URL, USERNAME, PASSWORD, POOL_NAME);
+    public static final Set<String> ALL = Set.of(MAX_POOL_SIZE, MIN_IDLE);
 
     private EtcdKeys() {}
 
@@ -44,24 +38,26 @@ public final class EtcdKeys {
      */
     public static Parsed parse(Map<String, String> fullKeys, String prefix) {
         Map<String, String> problems = new HashMap<>();
+        // null в целевых и таймаутных полях: из etcd они не приходят, их подставит resolve(defaults)
+        // из локальной конфигурации процесса.
         return new Parsed(new HikariSettings(
-                value(fullKeys, prefix, JDBC_URL),
-                value(fullKeys, prefix, USERNAME),
-                value(fullKeys, prefix, PASSWORD),
-                value(fullKeys, prefix, POOL_NAME),
+                null,
+                null,
+                null,
+                null,
                 intValue(fullKeys, prefix, MAX_POOL_SIZE, problems),
                 intValue(fullKeys, prefix, MIN_IDLE, problems),
-                longValue(fullKeys, prefix, CONNECTION_TIMEOUT, problems),
-                longValue(fullKeys, prefix, IDLE_TIMEOUT, problems),
-                longValue(fullKeys, prefix, MAX_LIFETIME, problems),
-                longValue(fullKeys, prefix, VALIDATION_TIMEOUT, problems),
-                longValue(fullKeys, prefix, LEAK_DETECTION, problems)), problems);
+                null,
+                null,
+                null,
+                null,
+                null), problems);
     }
 
     /** Настройки + список ключей, которые не удалось прочитать (ключ -> причина). */
-    public record Parsed(HikariSettings settings, Map<String, String> problems) {}
+    public static record Parsed(HikariSettings settings, Map<String, String> problems) {}
 
-    /** Неизвестные ключи (опечатки) — возвращаем, чтобы залогировать один раз. */
+    /** Неизвестные ключи (опечатки и снятые настройки) — возвращаем, чтобы залогировать один раз. */
     public static Set<String> unknownKeys(Map<String, String> fullKeys, String prefix) {
         Set<String> unknown = new HashSet<>();
         for (String key : fullKeys.keySet()) {
@@ -80,10 +76,6 @@ public final class EtcdKeys {
         return fullKey.startsWith(prefix) ? fullKey.substring(prefix.length()) : fullKey;
     }
 
-    private static String value(Map<String, String> fullKeys, String prefix, String shortKey) {
-        return fullKeys.get(prefix + shortKey);
-    }
-
     private static Integer intValue(Map<String, String> fullKeys, String prefix, String shortKey,
             Map<String, String> problems) {
         String raw = value(fullKeys, prefix, shortKey);
@@ -98,17 +90,7 @@ public final class EtcdKeys {
         }
     }
 
-    private static Long longValue(Map<String, String> fullKeys, String prefix, String shortKey,
-            Map<String, String> problems) {
-        String raw = value(fullKeys, prefix, shortKey);
-        if (raw == null) {
-            return null;
-        }
-        try {
-            return Long.valueOf(raw.trim());
-        } catch (NumberFormatException e) {
-            problems.put(shortKey, "'" + raw + "' — ожидалось целое число, взято значение по умолчанию");
-            return null;
-        }
+    private static String value(Map<String, String> fullKeys, String prefix, String shortKey) {
+        return fullKeys.get(prefix + shortKey);
     }
 }

@@ -77,7 +77,6 @@ provision:
   inactive-max-connections: ${PROV_INACTIVE_MAX_CONNECTIONS:1}
   # Верхняя граница доли (зеркалит HikariSettings.POOL_SIZE_MAX у сервиса, доли усекаются).
   max-share: ${PROV_MAX_SHARE:200}
-  connection-timeout-ms: ${PROV_CONNECTION_TIMEOUT_MS:3000}
   # Порог предупреждения о зависшем неосвобождённом сжатии: дольше него величина попадает в
   # журнал с числами, место при этом не перераспределяется (флот работает меньше бюджета).
   # 0 — не предупреждать.

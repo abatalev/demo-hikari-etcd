@@ -100,12 +100,4 @@ class HikariSettingsTest {
         assertThat(diff).anyMatch(d -> d.startsWith("password: *** -> ***"));
     }
 
-    @Test
-    void sameTargetDetectsRecreateRequired() {
-        HikariSettings other = new HikariSettings("jdbc:postgresql://other:5432/demo", "app", "app",
-                "pool-service", 10, null, 30_000L, 600_000L, 1_800_000L, 5_000L, 0L);
-
-        assertThat(base().sameTarget(other)).isFalse();
-        assertThat(base().sameTarget(base())).isTrue();
-    }
 }

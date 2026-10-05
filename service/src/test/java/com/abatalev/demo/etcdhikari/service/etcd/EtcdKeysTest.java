@@ -3,6 +3,7 @@ package com.abatalev.demo.etcdhikari.service.etcd;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class EtcdKeysTest {
@@ -10,20 +11,26 @@ class EtcdKeysTest {
     private static final String PREFIX = "/config/pool-service/hikari/";
 
     @Test
-    void readsFlatKeysIntoSettings() {
+    @DisplayName("из etcd читаются только размер и минимум")
+    void readsOnlySizeKeysIntoSettings() {
         Map<String, String> keys = Map.of(
                 PREFIX + "maximumPoolSize", "24",
-                PREFIX + "minimumIdle", "6",
-                PREFIX + "connectionTimeoutMs", "2500");
+                PREFIX + "minimumIdle", "6");
 
         EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, PREFIX);
 
         assertThat(parsed.settings().maximumPoolSize()).isEqualTo(24);
         assertThat(parsed.settings().minimumIdle()).isEqualTo(6);
-        assertThat(parsed.settings().connectionTimeoutMs()).isEqualTo(2500L);
-        // не задано в etcd -> null, дальше разрулит resolve(defaults)
-        assertThat(parsed.settings().maxLifetimeMs()).isNull();
+        // цель и таймауты из etcd не приходят: null, дальше разрулит resolve(defaults)
+        assertThat(parsed.settings().jdbcUrl()).isNull();
+        assertThat(parsed.settings().connectionTimeoutMs()).isNull();
         assertThat(parsed.problems()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("перечень распознаваемых ключей состоит из двух имён")
+    void recognizedKeysAreOnlySizeKeys() {
+        assertThat(EtcdKeys.ALL).containsExactlyInAnyOrder("maximumPoolSize", "minimumIdle");
     }
 
     @Test
@@ -61,5 +68,30 @@ class EtcdKeysTest {
                 "/other/prefix", "x");
 
         assertThat(EtcdKeys.unknownKeys(keys, PREFIX)).containsExactly("maxPoolSize");
+    }
+
+    @Test
+    @DisplayName("цель соединения и таймауты считаются неизвестными, значение не применяется")
+    void targetAndTimeoutKeysAreUnknown() {
+        Map<String, String> keys = Map.of(
+                PREFIX + "maximumPoolSize", "24",
+                PREFIX + "jdbcUrl", "jdbc:postgresql://другая/demo",
+                PREFIX + "username", "root",
+                PREFIX + "password", "secret",
+                PREFIX + "poolName", "чужой-пул",
+                PREFIX + "connectionTimeoutMs", "1000");
+
+        EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, PREFIX);
+
+        // ключи вне перечня не применяются: пул остаётся на локально заданной цели
+        assertThat(parsed.settings().maximumPoolSize()).isEqualTo(24);
+        assertThat(parsed.settings().jdbcUrl()).isNull();
+        assertThat(parsed.settings().username()).isNull();
+        assertThat(parsed.settings().password()).isNull();
+        assertThat(parsed.settings().poolName()).isNull();
+        assertThat(parsed.settings().connectionTimeoutMs()).isNull();
+        assertThat(EtcdKeys.unknownKeys(keys, PREFIX))
+                .containsExactlyInAnyOrder("jdbcUrl", "username", "password", "poolName",
+                        "connectionTimeoutMs");
     }
 }

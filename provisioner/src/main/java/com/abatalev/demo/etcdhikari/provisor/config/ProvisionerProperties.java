@@ -51,9 +51,6 @@ public class ProvisionerProperties {
      */
     private int maxShare = 200;
 
-    /** Стартовое значение connectionTimeoutMs для вновь зарегистрированных инстансов. */
-    private int connectionTimeoutMs = 3000;
-
     /**
      * Порог предупреждения о зависшем неосвобождённом сжатии, мс.
      *
@@ -130,14 +127,6 @@ public class ProvisionerProperties {
 
     public void setMaxShare(int maxShare) {
         this.maxShare = maxShare;
-    }
-
-    public int getConnectionTimeoutMs() {
-        return connectionTimeoutMs;
-    }
-
-    public void setConnectionTimeoutMs(int connectionTimeoutMs) {
-        this.connectionTimeoutMs = connectionTimeoutMs;
     }
 
     public Duration getCallTimeout() {

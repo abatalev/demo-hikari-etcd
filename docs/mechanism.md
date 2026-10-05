@@ -17,26 +17,28 @@ jetcd: событие watch (WatchResponse с батчем событий)
      │  EtcdPoolConfigSource.onEvent()            etcd/EtcdPoolConfigSource.java
      │    keys.put(key, value) или keys.remove(key) — полное состояние пути в памяти
      ▼
-EtcdKeys.parse(keys, path())                     etcd/EtcdKeys.java:45
+EtcdKeys.parse(keys, path())                     etcd/EtcdKeys.java:39
      │    ключи → HikariSettings; нечитаемое значение → в problems, остальное применяется
      ▼
-.settings().resolve(defaults)                      pool/HikariSettings.java:46
+.settings().resolve(defaults)                      pool/HikariSettings.java:52
      │    null → локальный дефолт из application.yml (размер пула 0 — пула нет)
      ▼
-ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:70  (synchronized)
+ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:170  (synchronized)
      │
      ├─ target.maximumPoolSize == 0               → closePool() (drain)    → CLOSED
      │
-     ├─ normalize()                                pool/HikariSettings.java:69
+     ├─ normalize()                                pool/HikariSettings.java:75
      │    вне диапазона → InvalidSettingsException → REJECTED, пул не тронут
      │    мягкие проблемы → warning + починка
      │
-     ├─ sameTarget() == false (jdbcUrl/креды/имя) → create() + drain()   → RECREATED
+     ├─ пула не было никогда (локальный максимум 0) → create()              → CREATED
+     │
+     ├─ пул был закрыт, пришла ненулевая доля    → create()              → RECREATED
      │
      ├─ diff() пуст                                → ничего не делать     → UNCHANGED
      │
-     └─ applyOnLivePool()                          pool/ManagedPool.java:112
-          максимум/минимум/таймауты через HikariConfigMXBean             → RESIZED
+     └─ applyOnLivePool()                          pool/ManagedPool.java:375
+          максимум/минимум через HikariConfigMXBean                      → RESIZED
 ```
 
 ## Путь конфигурации
@@ -201,13 +203,13 @@ base  = N' div serve                 базовая доля активного
 происходит вовсе, иначе выполняется ветка `Else` и ключ пишется; отсутствующий ключ — тот же случай
 (сравнение значения с несуществующим ключом в etcd никогда не проходит, поэтому `Else` и создаёт
 ключ). Это один поход в etcd, а две реплики в окне перехвата лидерства пишут одно и то же (записи
-идемпотентны). `connectionTimeoutMs` и остальные ключи остаются put-if-absent — ручные правки
-оператора переживают перезапуск инстанса.
+идемпотентны). `minimumIdle` остаётся put-if-absent — ручная правка оператора переживает
+перезапуск инстанса.
 
 Следствие для ручных правок: `maximumPoolSize` в etcd живёт **до ближайшего пересчёта** (изменение
 бюджета, изменение состава сервиса, рестарт провизёра, обрыв etcd). `make set-size`,
 `set-service-size`, `set-group-size` — временные оверайды для показа, а не способ задать размер
-пула. Остальные ключи в etcd живут **пока жив узел инстанса**: остановленный инстанс теряет
+пула. `minimumIdle` в etcd живёт **пока жив узел инстанса**: остановленный инстанс теряет
 конфигурацию целиком (вместе с ручными правками) и при следующем старте получает значения заново.
 При полном останове стенда (`docker compose down`) провизор останавливается вместе со всеми —
 успеет ли он увидеть `DELETE` узлов, зависит от порядка остановки; `make up` в любом случае
@@ -444,13 +446,17 @@ while (runtime().total() < target.maximumPoolSize() && System.nanoTime() < deadl
 
 ## Пересоздание пула и дренаж
 
-`jdbcUrl`, `username`, `password`, `poolName` через MBean не меняются — определяется это сравнением
-`sameTarget()` (`HikariSettings.java:115`). Тогда `create()` (`:212`) собирает новый
-`HikariDataSource`, переключает `AtomicReference` на него и закрывает старый.
+Пул пересоздаётся ровно в одном случае: пула нет, а пришла ненулевая доля. На стенде это значит
+снятие конфигурации (провижёр удаляет весь префикс `hikari/`, инстанс без доли — вовсе) и её
+возврат. Тогда `create()` (`ManagedPool.java:486`) собирает новый `HikariDataSource` и
+переключает `AtomicReference` на него; закрывать тут нечего, поэтому `create()` и не занимается
+дренажем. Смена цели соединения через конфигурацию невозможна вовсе: цель приходит только из
+локальной конфигурации процесса, а через MBean она и раньше не менялась.
 
-Проблема: `HikariDataSource.close()` закрывает и активные соединения, запросы в полёте падают
-с `08006`. Поэтому `drain()` (`:266`) сначала вытесняет idle через `softEvictConnections()`,
-потом ждёт до `pool.db.drain-on-recreate-timeout` (3с), пока активные соединения доработают:
+Проблема возникает на снятии: `HikariDataSource.close()` закрывает и активные соединения, запросы
+в полёте падают с `08006`. Поэтому `closePool()` (`ManagedPool.java:340`) сперва уводит поколение в
+дренаж, а `drain()` (`ManagedPool.java:565`) вытесняет idle через `softEvictConnections()` и ждёт до
+`pool.db.drain-on-recreate-timeout` (3с), пока активные соединения доработают:
 
 ```java
 pool.softEvictConnections();
@@ -485,6 +491,10 @@ while (pool.getActiveConnections() > 0 && System.nanoTime() < deadline) {
 | `jdbcUrl` | обязан начинаться с `jdbc:` |
 | `username`, `poolName` | обязательны |
 | `password` | обязателен, но может быть пустой строкой (вход без пароля) |
+
+Из etcd приходят только `maximumPoolSize` и `minimumIdle`; остальные поля этой таблицы проверяются
+на локальных значениях, но проверка одна и та же — она в `normalize()` и не знает, откуда пришло
+значение.
 
 **Мягкий** — warning в лог, значение чинится, конфиг применяется:
 
@@ -523,9 +533,9 @@ while (pool.getActiveConnections() > 0 && System.nanoTime() < deadline) {
 
 | outcome | когда | видно |
 |---|---|---|
-| `CREATED` | первый пул в процессе после старта (или заново после 0) | `HikariCP '<имя инстанса>' создан: ...` |
-| `RESIZED` | настройки изменились, пул тот же | `обновлён на лету: maximumPoolSize: 10 -> 25` + строка eager fill при росте |
-| `RECREATED` | сменилась цель (jdbcUrl/креды/имя) | `пересоздан (сменилась цель: jdbcUrl/креды/имя)`, перед этим строки про дренаж |
+| `CREATED` | первый пул в процессе после старта | `HikariCP '<имя инстанса>' создан: ...` |
+| `RESIZED` | размер изменился, пул тот же | `обновлён на лету: maximumPoolSize: 10 -> 25` + строка eager fill при росте |
+| `RECREATED` | пул был закрыт (нулевой размер или снятие конфигурации), пришла ненулевая доля | `HikariCP '<имя>' создан заново после снятия конфигурации: max=… minIdle=…`, событие трассы `pool.recreate`, растут `pool_generation` и `pool_recreate_total` |
 | `CLOSED` | целевой размер 0 (пул снят) | `пул закрыт (целевой размер 0)`, перед этим дренаж |
 | `UNCHANGED` | diff пуст | ничего, только debug |
 | `REJECTED` | `normalize()` бросил исключение или 0 из etcd | `конфиг отклонён (...), остаёмся на предыдущих значениях: ...` + причина в том же сообщении |

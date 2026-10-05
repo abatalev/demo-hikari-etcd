@@ -118,14 +118,6 @@ public record HikariSettings(
 
     public record Normalized(HikariSettings settings, List<String> warnings) {}
 
-    /** Признак "это те же коннекты" — если false, пул надо пересоздать. */
-    public boolean sameTarget(HikariSettings other) {
-        return java.util.Objects.equals(jdbcUrl, other.jdbcUrl)
-                && java.util.Objects.equals(username, other.username)
-                && java.util.Objects.equals(password, other.password)
-                && java.util.Objects.equals(poolName, other.poolName);
-    }
-
     /** Список изменений вида "maximumPoolSize: 10 -> 20" для логов и признаков трассы. */
     public List<String> diff(HikariSettings other) {
         List<String> out = new ArrayList<>();

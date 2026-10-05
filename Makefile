@@ -265,10 +265,6 @@ set-min-idle: ## зафиксировать minimumIdle инстанса: make s
 unset-min-idle: ## убрать minimumIdle инстанса (снова follow за maximumPoolSize): [I=имя]
 	@$(COMPOSE) run --rm --no-deps etcdctl del "$(call tuple_path,$(call tuple_by_I,$(I)))minimumIdle"
 
-.PHONY: set-conn-timeout
-set-conn-timeout: ## connectionTimeoutMs инстанса: make set-conn-timeout SIZE=1000 [I=имя]
-	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(call tuple_by_I,$(I)))connectionTimeoutMs" "$(SIZE)"
-
 .PHONY: config
 config: ## ключи инстанса из etcd: make config [I=имя]
 	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(call tuple_path,$(call tuple_by_I,$(I)))"
