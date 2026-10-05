@@ -33,6 +33,14 @@ x-service: &service-base
     POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
     ETCD_ENDPOINTS: http://etcd:2379
     ETCD_ROOT: ${ETCD_ROOT:-/config}
+    # Доля запросов, попадающих в трассу: 1.0 — всё (стенд и разбор перехода), меньше — меньше
+    # помехи под долгой нагрузкой. События механизма отбираются всегда, независимо от доли.
+    OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+    # Адреса точки приёма сигналов. По умолчанию дверь стенда; переопределение нужно, чтобы
+    # проверить, что отправка не влияет на пул и трафик (сценарий «точка приёма недоступна»).
+    OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+    OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+    OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
   healthcheck:
     # Готовность (гейт конфигурации), а не общий health: живость от etcd не зависит.
     test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
@@ -82,6 +90,13 @@ x-provisioner: &provisioner
     PROV_MAX_SHARE: ${PROV_MAX_SHARE:-200}
     PROV_CONNECTION_TIMEOUT_MS: ${PROV_CONNECTION_TIMEOUT_MS:-3000}
     PROV_LEADER_TTL: ${PROV_LEADER_TTL:-10s}
+    # Доля запросов, попадающих в трассу: 1.0 — всё, меньше — меньше помехи.
+    OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+    # Адреса точки приёма сигналов: по умолчанию дверь стенда, переопределение — для проверки
+    # «наблюдение недоступно, провижининг работает».
+    OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+    OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+    OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
   healthcheck:
     # Живость — только ping: провижининг переживает обрывы etcd сам.
     test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
@@ -354,9 +369,67 @@ services:
       TARGET: http://lb:81
       STATUS_TARGET: http://service-b-group-1-1:8080
 
-  # --- наблюдение: сборщик метрик, сборщик метрик базы, витрина ---
+  # --- наблюдение: единая дверь сигналов и её хранилища, сборщик метрик, сборщик метрик базы,
+  # витрина ---
   # Ни один из них не входит ни в одну цепочку depends_on: недоступность наблюдения не должна мешать
   # ни подъёму стенда, ни обслуживанию трафика. Состояние целей — отдельная проверка (make targets).
+  #
+  # Дверь и хранилища образов без оболочки (distroless), поэтому healthcheck у них не задаётся:
+  # в образе нет ни wget, ни curl, а проверка готовности идёт снаружи, с хоста
+  # (scripts/wait-ready.sh: 9464/metrics у двери, /ready у хранилищ) и не влияет на код возврата.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    # Потолок двери: приложения шлют метрики раз в 5с, трассы и журналы — событиями; под нагрузкой
+    # стенда (32 потока нагрузчика на сервис) она держится в десятках мегабайт. 256m — с запасом.
+    mem_limit: 256m
+    environment:
+      # Рекомендация точки приёма: сборщик мусора Go должен знать потолок заранее, иначе он
+      # держит кучу на пределе и упрётся в cgroup раньше, чем сработает ограничитель памяти.
+      # 80% жёсткого потолка ограничителя (192 МиБ, см. otel/collector.yaml).
+      GOMEMLIMIT: 153MiB
+    command:
+      - --config=/etc/otel/collector.yaml
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      # Приём сигналов приложений (4318) и текстовая точка метрик двери (9464) — её опрашивает
+      # сборщик, а по 9464 видно состояние двери и без сборщика (docker compose ps, curl).
+      - "${OTLP_PORT:-4318}:4318"
+      - "${OTEL_METRICS_PORT:-9464}:9464"
+
+  # Хранилище трасс. Тома нет намеренно (см. otel/tempo.yaml): история нужна на разбор перехода,
+  # а не как постоянное хранилище.
+  #
+  # Лимит памяти 1 ГиБ, а не 512 МиБ, измерено: при 100% отборе трасс и нагрузке стенда 512 МиБ
+  # не хватало — контейнер был убит по памяти (ExitCode 137, OOMKilled) через 23 часа работы, и
+  # хранилище молчало, пока дверь копила неотправленные трассы и не начала отказывать в метриках
+  # всего флота. GOMEMLIMIT ниже лимита — чтобы Go собрал мусор сам, до того как это сделает
+  # docker: иначе смерть контейнера выглядит как падение двери.
+  tempo:
+    image: grafana/tempo:3.1.0
+    mem_limit: 1g
+    environment:
+      GOMEMLIMIT: 768MiB
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - ./otel/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      # 3200 — API хранилища трасс: /ready, поиск по признакам, разбор трассы вручную.
+      - "${TEMPO_PORT:-3200}:3200"
+
+  # Хранилище журналов. Тома нет намеренно (см. otel/loki.yaml).
+  loki:
+    image: grafana/loki:3.7.8
+    mem_limit: 512m
+    command:
+      - -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./otel/loki.yaml:/etc/loki/loki.yaml:ro
+    ports:
+      # 3100 — API хранилища журналов: /ready, список меток, запросы по инстансу.
+      - "${LOKI_PORT:-3100}:3100"
+
   prometheus:
     image: prom/prometheus:v3.6.0
     mem_limit: 512m
@@ -367,9 +440,9 @@ services:
       # Постоянного тома нет намеренно — после перезапуска история теряется (см. docs/operations.md).
       - --storage.tsdb.retention.time=2h
     volumes:
-      # Конфигурация, правила и список целей лежат в репозитории; список целей перегенерирует make
-      # prometheus-targets из ETCD_INSTANCES. Каталог целиком: пути в конфигурации совпадают с
-      # путями в репозитории, поэтому правила и цели не надо перечислять поимённо.
+      # Конфигурация и правила лежат в репозитории; правила молчания инстанса перегенерирует
+      # make silence-rules из ETCD_INSTANCES. Каталог целиком: пути в конфигурации совпадают с
+      # путями в репозитории, поэтому правила не надо перечислять поимённо.
       - ./prometheus:/etc/prometheus:ro
     ports:
       - "${PROM_PORT:-9090}:9090"

@@ -3,9 +3,10 @@
 # (/actuator/health/readiness = UP) и обе точки входа балансировщика не начнут маршрутизировать.
 # С таймаутом: по истечении перечисляет, что не готово, и завершается с кодом 1.
 #
-# Сборщик метрик, сборщик метрик базы и витрина в это условие НЕ входят: недоступность наблюдения
-# не должна ронять подъём стенда и мешать обслуживанию трафика. Их готовность ждём отдельно и
-# коротко, а по итогам печатаем состояние — решение о том, мешает ли это, остаётся за человеком.
+# Дверь сигналов, хранилища трасс и журналов, сборщик метрик, сборщик метрик базы и витрина в это
+# условие НЕ входят: недоступность наблюдения не должна ронять подъём стенда и мешать обслуживанию
+# трафика. Их готовность ждём отдельно и коротко, а по итогам печатаем состояние — решение о том,
+# мешает ли это, остаётся за человеком.
 set -u
 
 INSTANCES="$1"
@@ -16,6 +17,9 @@ PROM_PORT="${5:-9090}"
 GRAFANA_PORT="${6:-3000}"
 EXPORTER_PORT_A="${7:-9187}"
 EXPORTER_PORT_B="${8:-9188}"
+OTEL_METRICS_PORT="${9:-9464}"
+TEMPO_PORT="${10:-3200}"
+LOKI_PORT="${11:-3100}"
 
 # Окно ожидания наблюдения: отдельное и короткое, чтобы стенд не ждал его впустую.
 OBS_WAIT_S="${OBS_WAIT_S:-60}"
@@ -79,11 +83,17 @@ while :; do
     check_obs "http://localhost:${EXPORTER_PORT_A}/metrics" "сборщик метрик базы a@${EXPORTER_PORT_A}"
     check_obs "http://localhost:${EXPORTER_PORT_B}/metrics" "сборщик метрик базы b@${EXPORTER_PORT_B}"
     check_obs "http://localhost:${GRAFANA_PORT}/api/health" "витрина метрик@${GRAFANA_PORT}"
+    # Дверь сигналов и её хранилища. Точка метрик двери вместо /ready: у образа без оболочки нет
+    # ни wget, ни curl (в compose healthcheck не задаётся), а 9464/metrics отвечает только когда
+    # дверь поднялась и держит накопленные величины. Хранилища отвечают своим /ready.
+    check_obs "http://localhost:${OTEL_METRICS_PORT}/metrics" "дверь сигналов@${OTEL_METRICS_PORT}"
+    check_obs "http://localhost:${TEMPO_PORT}/ready" "хранилище трасс@${TEMPO_PORT}"
+    check_obs "http://localhost:${LOKI_PORT}/ready" "хранилище журналов@${LOKI_PORT}"
     if [ ${#obs_left[@]} -eq 0 ] || [ "$(date +%s)" -ge "$obs_deadline" ]; then
         if [ ${#obs_left[@]} -gt 0 ]; then
             echo "  НЕ ГОТОВО (стенд работает): ${obs_left[*]}" >&2
-            echo "  состояние контейнеров: docker compose ps prometheus postgres-exporter-a postgres-exporter-b grafana" >&2
-            echo "  логи: docker compose logs prometheus postgres-exporter-a postgres-exporter-b grafana" >&2
+            echo "  состояние контейнеров: docker compose ps prometheus postgres-exporter-a postgres-exporter-b grafana otel-collector tempo loki" >&2
+            echo "  логи: docker compose logs prometheus postgres-exporter-a postgres-exporter-b grafana otel-collector tempo loki" >&2
         fi
         break
     fi

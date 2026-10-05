@@ -1,6 +1,7 @@
 package com.abatalev.demo.etcdhikari.service.config;
 
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
+import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
@@ -19,14 +20,15 @@ public class PoolBeansConfiguration {
      * (холодная группа, снятие конфигурации) закрывает его с дренажом.
      */
     @Bean(destroyMethod = "close")
-    ManagedPool managedPool(DbProperties properties, PoolCounters counters) {
+    ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans) {
         return new ManagedPool(
                 properties.toSettings(),
                 properties.getInitializationFailTimeoutMs(),
                 properties.isRegisterMbeans(),
                 properties.isEagerFillOnResize(),
                 properties.getDrainOnRecreateTimeout(),
-                counters);
+                counters,
+                spans);
     }
 
     @Bean

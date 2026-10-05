@@ -12,6 +12,38 @@ management:
     web:
       exposure:
         include: health,info,metrics,prometheus
+  # Единая точка приёма сигналов: журналы, трассы и метрики уходят в otel-collector, который
+  # отдаёт метрики сборщику в текстовом формате и кладёт трассы в Tempo, журналы — в Loki.
+  # Текстовая точка /actuator/prometheus остаётся для человека.
+  otlp:
+    metrics:
+      export:
+        url: ${OTEL_METRICS_URL:http://otel-collector:4318/v1/metrics}
+        step: ${OTEL_METRICS_STEP:5s}
+        # Намертво заданные границы распределения прибора: смена умолчания Micrometer поехала бы
+        # молча, а панель перцентилей молчала бы не об ошибке, а о другой величине.
+        histogram-flavor: explicit_bucket_histogram
+        # Единица времени в секундах, а не в миллисекундах (умолчание отправки): тогда имя
+        # прибора в тексте получается тем же, что и на текстовой точке (…_seconds), и ни один
+        # запрос в панелях и правилах не приходится переписывать при переходе на точку приёма.
+        # Без этого приборы времени HTTP у провизёра приходили как …_milliseconds_* — измерено.
+        base-time-unit: seconds
+    tracing:
+      endpoint: ${OTEL_TRACES_URL:http://otel-collector:4318/v1/traces}
+    logging:
+      endpoint: ${OTEL_LOGS_URL:http://otel-collector:4318/v1/logs}
+  tracing:
+    sampling:
+      # Доля запросов, которые попадают в трассу: на стенде смотреть всё (1.0), под долгой
+      # нагрузкой помеху можно уменьшить (см. .env). События механизма отбираются всегда.
+      probability: ${OTEL_TRACES_SAMPLING:1.0}
+  opentelemetry:
+    resource-attributes:
+      # Общий признак измерения повторяется в ресурсе сигнала: у метрик он общий тег, а у трасс
+      # и журналов общих тегов нет, и без него в Tempo и Loki реплики неразличимы. service.instance.id
+      # не задаётся намеренно: он превратился бы в признак instance на рядах метрик, а этот признак
+      # у сборщика — адрес цели, и переопределять его нельзя.
+      replica: ${PROV_NAME:unknown}
   metrics:
     tags:
       # Имя реплики — то же значение, что в ключе выборов, поэтому по метрикам видно, кто считал

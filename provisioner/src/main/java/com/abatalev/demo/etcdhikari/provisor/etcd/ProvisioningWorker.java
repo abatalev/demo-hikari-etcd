@@ -31,6 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.abatalev.demo.etcdhikari.provisor.metrics.ProvisionerMetrics;
+import com.abatalev.demo.etcdhikari.provisor.otel.MechanismSpans;
 
 /**
  * Воркер провижининга одного сервиса: держит инвариант «ключи конфигурации инстанса существуют
@@ -355,6 +356,19 @@ final class ProvisioningWorker implements Runnable {
      *     false — только пересчёт роста по публикации
      */
     private void provision(Client c, Tree tree, boolean full) throws Exception {
+        // Событие механизма на весь пересчёт: состав, распределение и записи — одна операция. По
+        // журналу видно, что решил провижёр; по трассе — как принималось решение и чем кончилось.
+        try (MechanismSpans.Event event = owner.mechanism().start("provisioner.fleet.recompute", b -> b
+                .setAttribute("service", service)
+                .setAttribute("fleet.full", full)
+                .setAttribute("fleet.revision", tree.revision)
+                .setAttribute("fleet.nodes", tree.nodes.size()))) {
+            provisionWithin(c, tree, full, event);
+        }
+    }
+
+    private void provisionWithin(Client c, Tree tree, boolean full, MechanismSpans.Event event)
+            throws Exception {
         Integer budget = budgetValue(c, InstanceKey.ACTIVE_MAX_CONNECTIONS,
                 owner.properties().getActiveMaxConnections(), tree, full);
         Integer min = budgetValue(c, InstanceKey.ACTIVE_MIN_CONNECTIONS,
@@ -367,6 +381,7 @@ final class ProvisioningWorker implements Runnable {
                     + "распределение не выполнено, конфигурация оставлена как есть", service,
                     InstanceKey.ACTIVE_MAX_CONNECTIONS, InstanceKey.ACTIVE_MIN_CONNECTIONS,
                     InstanceKey.INACTIVE_MAX_CONNECTIONS, tree.nodes.size());
+            refuse(event, "нечисловой ключ бюджета");
             return;
         }
 
@@ -394,18 +409,21 @@ final class ProvisioningWorker implements Runnable {
             log.warn("сервис {}: резерв неактивного флота R={} вне диапазона [0..{}] — "
                     + "распределение не выполнено, конфигурация оставлена как есть", service,
                     reserve, maxShare);
+            refuse(event, "резерв неактивного флота вне диапазона");
             return;
         }
         if (reserveTotal > budget) {
             log.warn("сервис {}: резерв неактивных R={} × k={} = {} превышает бюджет N={} — "
                     + "распределение не выполнено, конфигурация оставлена как есть", service,
                     reserve, k, reserveTotal, budget);
+            refuse(event, "резерв неактивных превышает бюджет");
             return;
         }
         if (!activeKeys.isEmpty() && activeBudget < min) {
             log.warn("сервис {}: после резерва активным остаётся {} < минимума m={} (N={}, R={}, "
                     + "k={}) — распределение не выполнено, конфигурация оставлена как есть",
                     service, activeBudget, min, budget, reserve, k);
+            refuse(event, "активному флоту не хватило минимума");
             return;
         }
 
@@ -426,6 +444,7 @@ final class ProvisioningWorker implements Runnable {
                 log.warn("сервис {}: распределение активного бюджета не выполнено: {} (N={}, "
                                 + "m={}, R={}, k={}) — конфигурация оставлена как есть", service,
                         result.refusal(), budget, min, reserve, k);
+                refuse(event, "распределение отказало: " + result.refusal());
                 return;
             }
             excess = result.excess();
@@ -458,7 +477,8 @@ final class ProvisioningWorker implements Runnable {
             }
             String prefix = hikariPrefixByNode.get(decision.nodeKey());
             servedPrefixes.add(prefix);
-            int written = setPoolSize(c, prefix, String.valueOf(decision.command()));
+            String instance = tree.nodes.get(decision.nodeKey()).instance();
+            int written = setPoolSize(c, prefix, String.valueOf(decision.command()), instance);
             resizes += written;
             if (decision.grows()) {
                 grew++;
@@ -476,7 +496,7 @@ final class ProvisioningWorker implements Runnable {
                 // Префикса ещё нет: инстанс ещё не обслуживался, и стартовые ключи ему нужны.
                 // Ставим их только когда доля действительно выдана, а не пока ждём освобождения.
                 ensureKey(c, prefix, "connectionTimeoutMs",
-                        String.valueOf(owner.properties().getConnectionTimeoutMs()));
+                        String.valueOf(owner.properties().getConnectionTimeoutMs()), instance);
             }
         }
 
@@ -503,6 +523,23 @@ final class ProvisioningWorker implements Runnable {
                         plan.sumHeld(), plan.growable()),
                 full);
 
+        event.note("fleet.outcome", "применено");
+        event.note("fleet.budget", budget);
+        event.note("fleet.min", min);
+        event.note("fleet.reserve", reserve);
+        event.note("fleet.active", activeKeys.size());
+        event.note("fleet.inactive", k);
+        event.note("fleet.served", shares.size());
+        event.note("fleet.resizes", resizes);
+        event.note("fleet.grew", grew);
+        event.note("fleet.deferred", deferred);
+        event.note("fleet.cleaned", cleaned);
+        event.note("fleet.excess", excess);
+        event.note("fleet.sum_ceilings", plan.sumCeilings());
+        event.note("fleet.sum_debt", plan.sumDebt());
+        event.note("fleet.sum_held", plan.sumHeld());
+        event.note("fleet.growable", plan.growable());
+
         if (resizes > 0 || cleaned > 0 || deferred > 0 || excess > 0 || k > 0
                 || !activeKeys.isEmpty()) {
             log.info("пересчёт сервиса {}: N={}, m={}, R={}, активных {}, неактивных (k) {}, "
@@ -518,6 +555,23 @@ final class ProvisioningWorker implements Runnable {
     /** Ключ {@code maximumPoolSize} внутри префикса конфигурации узла. */
     private boolean isCeilingKey(String fullKey, String nodeKey) {
         return fullKey.equals(nodeKey + HIKARI_SEGMENT + "maximumPoolSize");
+    }
+
+    /** Имя инстанса по префиксу конфигурации; неизвестный путь остаётся путём. */
+    private String instanceOf(String hikariPrefix) {
+        InstanceKey.Parsed parsed = InstanceKey.parse(owner.properties().getRoot(), hikariPrefix);
+        return parsed instanceof InstanceKey.Config config ? config.instance() : hikariPrefix;
+    }
+
+    /**
+     * Fail-closed: конфигурация не тронута, и это тоже решение.
+     *
+     * <p>В трассе оно обязано отличаться от «применено»: иначе пересчёт, о котором в журнале
+     * написано «распределение не выполнено», в трассах читался бы как обычная работа флота.
+     */
+    private void refuse(MechanismSpans.Event event, String reason) {
+        event.note("fleet.outcome", "отказ");
+        event.note("fleet.refusal", reason);
     }
 
     /**
@@ -706,7 +760,8 @@ final class ProvisioningWorker implements Runnable {
      *
      * @return 1, если значение изменено или ключ создан, 0 — уже было равно доле
      */
-    private int setPoolSize(Client c, String hikariPrefix, String size) throws Exception {
+    private int setPoolSize(Client c, String hikariPrefix, String size, String instance)
+            throws Exception {
         ByteSequence key = ConfigProvisioner.bs(hikariPrefix + "maximumPoolSize");
         ByteSequence target = ConfigProvisioner.bs(size);
         TxnResponse resp = c.getKVClient().txn()
@@ -716,6 +771,13 @@ final class ProvisioningWorker implements Runnable {
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
         if (!resp.isSucceeded()) {
             log.info("пересчёт: {} maximumPoolSize={}", hikariPrefix, size);
+            // Событие механизма только о состоявшейся записи: приказ, равный текущему значению,
+            // ключа не меняет, и след такого «решения» в трассах был бы пустым.
+            owner.mechanism().event("etcd.fleet.write.ceiling", b -> b
+                    .setAttribute("service", service)
+                    .setAttribute("node", instance)
+                    .setAttribute("etcd.key", key.toString(StandardCharsets.UTF_8))
+                    .setAttribute("pool.max", Long.parseLong(size)));
             return 1;
         }
         log.debug("пересчёт: {} maximumPoolSize уже {}", hikariPrefix, size);
@@ -723,7 +785,7 @@ final class ProvisioningWorker implements Runnable {
     }
 
     /** Обеспечение стартового ключа инстанса (каждый — атомарно, «ключа нет → put»). */
-    private void ensureKey(Client c, String hikariPrefix, String name, String value)
+    private void ensureKey(Client c, String hikariPrefix, String name, String value, String instance)
             throws Exception {
         ByteSequence key = ConfigProvisioner.bs(hikariPrefix + name);
         TxnResponse resp = c.getKVClient().txn()
@@ -734,6 +796,11 @@ final class ProvisioningWorker implements Runnable {
         if (resp.isSucceeded()) {
             log.info("провижининг: положен ключ {}={}",
                     key.toString(StandardCharsets.UTF_8), value);
+            owner.mechanism().event("etcd.fleet.write.startup_key", b -> b
+                    .setAttribute("service", service)
+                    .setAttribute("node", instance)
+                    .setAttribute("etcd.key", key.toString(StandardCharsets.UTF_8))
+                    .setAttribute("etcd.value", value));
         } else {
             log.debug("провижининг: ключ {} уже существует, не трогаю",
                     key.toString(StandardCharsets.UTF_8));
@@ -750,6 +817,13 @@ final class ProvisioningWorker implements Runnable {
         if (deleted > 0) {
             owner.metrics().prefixWipe();
             log.info("очистка: удалено {} ключей префикса {}", deleted, hikariPrefix);
+            owner.mechanism().event("etcd.fleet.wipe", b -> b
+                    .setAttribute("service", service)
+                    // Префикс разбираем, а не ищем по узлам: у осиротевшего префикса узла уже нет,
+                    // и имя инстанса для события берётся из самого пути.
+                    .setAttribute("node", instanceOf(hikariPrefix))
+                    .setAttribute("etcd.prefix", hikariPrefix)
+                    .setAttribute("etcd.deleted", deleted));
         }
     }
 

@@ -35,6 +35,7 @@ import org.springframework.stereotype.Component;
 import com.abatalev.demo.etcdhikari.service.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
+import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
 import com.abatalev.demo.etcdhikari.service.pool.InvalidSettingsException;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
@@ -74,6 +75,9 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private final EtcdProperties properties;
     private final ApplicationEventPublisher eventPublisher;
     private final PoolCounters counters;
+
+    /** Трассы событий механизма; NOOP — наблюдение выключено. */
+    private final MechanismSpans spans;
 
     /** Путь ключей этого экземпляра; null, когда источник выключен. */
     private final String path;
@@ -115,12 +119,13 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private volatile Thread publicationThread;
 
     public EtcdPoolConfigSource(ManagedPool pool, DbProperties dbProperties, EtcdProperties properties,
-            ApplicationEventPublisher eventPublisher, PoolCounters counters) {
+            ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismSpans spans) {
         this.pool = pool;
         this.defaults = dbProperties.toSettings();
         this.properties = properties;
         this.eventPublisher = eventPublisher;
         this.counters = counters;
+        this.spans = spans == null ? MechanismSpans.NOOP : spans;
         if (properties.isEnabled()) {
             this.path = EtcdKeyPath.build(properties.getRoot(), properties.getService(),
                     properties.getGroup(), properties.getInstance());
@@ -472,12 +477,21 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             return false;
         }
         try {
-            c.getKVClient()
-                    .put(
-                            ByteSequence.from(unreleasedPath, StandardCharsets.UTF_8),
-                            ByteSequence.from(Integer.toString(value), StandardCharsets.UTF_8),
-                            PutOption.newBuilder().withLeaseId(lease).build())
-                    .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            // Событие механизма: запись величины, которой провижёр ждёт, чтобы перераспределить
+            // место. По трассе видно, что место освобождается и сколько раз публикация стоила.
+            spans.run("etcd.drain_debt.publish", b -> b
+                    .setAttribute("etcd.key", unreleasedPath)
+                    .setAttribute("etcd.value", value)
+                    .setAttribute("pool.debt", debt)
+                    .setAttribute("pool.max", pool.runtime().maximumPoolSize())
+                    .setAttribute("pool.total", pool.runtime().total())
+                    .setAttribute("etcd.lease", lease),
+                    () -> c.getKVClient()
+                            .put(
+                                    ByteSequence.from(unreleasedPath, StandardCharsets.UTF_8),
+                                    ByteSequence.from(Integer.toString(value), StandardCharsets.UTF_8),
+                                    PutOption.newBuilder().withLeaseId(lease).build())
+                            .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS));
             log.info("опубликовано неосвобождённое сжатие: {} (потолок {}, удерживается {})",
                     value, pool.runtime().maximumPoolSize(), debt);
             return true;

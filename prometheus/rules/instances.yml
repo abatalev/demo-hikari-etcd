@@ -1,0 +1,121 @@
+# ПРАВИЛА МОЛЧАНИЯ ИНСТАНСА. Файл генерируется: scripts/silence.py из ETCD_INSTANCES
+# (`make silence-rules`), сверка — `make check-silence`. Правьте состав стенда в .env.
+#
+# Пока инстансы отдавали метрики по /actuator/prometheus, сборщик опрашивал каждый отдельно, и
+# молчание процесса означало молчание цели. Теперь метрики идут отправкой в одну точку приёма,
+# и одна цель на весь флот молчит иначе, чем молчит один инстанс: список целей такую
+# неотличимость больше не выражает. Отсюда правила ниже — отсутствие ряда поимённо.
+#
+# Ряд состояния пула выбран потому, что существует у процесса всегда, независимо от наличия
+# конфигурации: снятие конфигурации его не убирает. Поэтому инстанс без доли бюджета (503,
+# готовность DOWN) молчанием не считается, а упавший процесс считается.
+#
+# Молчание снимается само собой: как только ряд появился, absent() перестаёт срабатывать.
+#
+# Окно `for` — 2м, и столько же нужно на обнаружение. Измерено на стенде (остановка контейнера
+# инстанса, штатное время): от остановки до срабатывания прошло 160с. Раскладывается так — дверь
+# убирает ряд из своей выдачи через metric_expiration (30с), сборщик на следующем опросе помечает
+# его устаревшим, и только тогда absent() начинает видеть отсутствие; плюс окно for 2м и шаг
+# проверки правил. Пятиминутное окно lookback здесь не участвует: устаревший ряд сборщик не
+# переносит вперёд, а метка устаревания действует сразу. Lookback вступает в дело только если дверь
+# продолжает отдавать ряд без свежих точек (например, если metric_expiration увеличить): тогда
+# отсутствие заметят лишь через окно lookback, и до срабатывания пройдёт около 7 минут. Поэтому в
+# наборе проверок правил нарушение задано восемьюмянутным промежутком без точек, а норма — точками
+# не старше минуты.
+#
+# Запас берётся в сторону ложного молчания, а не ложной тревоги: молчание — не «инстанс сейчас
+# упал», а «инстанса нет в наблюдении дольше, чем мы обычно ждём доставку». Промежуток на возврат
+# ряда: измерено 20с от старта процесса до снятия правила (метрики приходят раз в 5с), то есть
+# короткий обрыв доставки — десятки секунд — правилом молчания не ловится.
+
+groups:
+  - name: instances
+    rules:
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-a-group-1-1"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-a-group-1-1
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-a/group-1/service-a-group-1-1: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-a-group-1-2"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-a-group-1-2
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-a/group-1/service-a-group-1-2: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-a-group-2-1"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-a-group-2-1
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-a/group-2/service-a-group-2-1: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-a-group-2-2"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-a-group-2-2
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-a/group-2/service-a-group-2-2: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-b-group-1-1"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-b-group-1-1
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-b/group-1/service-b-group-1-1: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-b-group-1-2"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-b-group-1-2
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-b/group-1/service-b-group-1-2: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-b-group-2-1"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-b-group-2-1
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-b/group-2/service-b-group-2-1: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.
+      - alert: InstanceSilent
+        expr: absent(pool_config_state{node="service-b-group-2-2"})
+        for: 2m
+        labels:
+          severity: warning
+          node: service-b-group-2-2
+        annotations:
+          summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
+          description: >-
+            service-b/group-2/service-b-group-2-2: нет ряда pool_config_state — процесс не присылает метрики либо
+            отправка в точку приёма не доходит. Состав стенда: make check-instances.

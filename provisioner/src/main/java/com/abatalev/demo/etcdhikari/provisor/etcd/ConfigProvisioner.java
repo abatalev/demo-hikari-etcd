@@ -2,6 +2,7 @@ package com.abatalev.demo.etcdhikari.provisor.etcd;
 
 import com.abatalev.demo.etcdhikari.provisor.config.ProvisionerProperties;
 import com.abatalev.demo.etcdhikari.provisor.metrics.ProvisionerMetrics;
+import com.abatalev.demo.etcdhikari.provisor.otel.MechanismSpans;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KeyValue;
@@ -66,6 +67,7 @@ public class ConfigProvisioner implements SmartLifecycle {
 
     private final ProvisionerProperties properties;
     private final ProvisionerMetrics metrics;
+    private final MechanismSpans spans;
 
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicReference<Client> clientRef = new AtomicReference<>();
@@ -86,9 +88,11 @@ public class ConfigProvisioner implements SmartLifecycle {
     private volatile Thread leaseThread;
     private volatile Thread electionThread;
 
-    public ConfigProvisioner(ProvisionerProperties properties, ProvisionerMetrics metrics) {
+    public ConfigProvisioner(ProvisionerProperties properties, ProvisionerMetrics metrics,
+            MechanismSpans spans) {
         this.properties = properties;
         this.metrics = metrics;
+        this.spans = spans == null ? MechanismSpans.NOOP : spans;
         this.replicaName = properties.resolveName();
         String root = InstanceKey.normalizedRoot(properties.getRoot());
         this.servicesPrefix = root + "/services/";
@@ -311,9 +315,20 @@ public class ConfigProvisioner implements SmartLifecycle {
         if (mine && !Boolean.TRUE.equals(prev)) {
             log.info("реплика {} выиграла выборы сервиса {} (ключ {})", replicaName, service,
                     candidateKey(service, lease));
+            // Событие механизма — только о переходе, а не о каждом поллинге: выборы идут раз в
+            // секунду, и след каждого холостого сравнения в трассах только шумел бы.
+            spans.event("provisioner.election.won", b -> b
+                    .setAttribute("service", service)
+                    .setAttribute("election.lease", lease)
+                    .setAttribute("election.candidates", kvs.size()));
         } else if (!mine && Boolean.TRUE.equals(prev)) {
             log.info("реплика {} потеряла лидерство сервиса {} (ведёт lease {})", replicaName,
                     service, kvs.isEmpty() ? "нет" : kvs.get(0).getLease());
+            spans.event("provisioner.election.lost", b -> b
+                    .setAttribute("service", service)
+                    .setAttribute("election.lease", lease)
+                    .setAttribute("election.candidates", kvs.size())
+                    .setAttribute("election.leader_lease", kvs.isEmpty() ? 0L : kvs.get(0).getLease()));
         }
         leaderState.put(service, mine);
         // Ряд лидерства есть у обеих реплик: по метрикам видно, кто вёл сервис, даже когда
@@ -415,6 +430,11 @@ public class ConfigProvisioner implements SmartLifecycle {
     /** Метрики реплики; воркер публикует в них величины флота и счётчики решений. */
     ProvisionerMetrics metrics() {
         return metrics;
+    }
+
+    /** Трассы событий механизма; воркер размечает ими свои решения и записи. */
+    MechanismSpans mechanism() {
+        return spans;
     }
 
     boolean sleep(long ms) {

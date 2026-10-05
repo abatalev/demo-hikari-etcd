@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import com.abatalev.demo.etcdhikari.service.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;
+import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
@@ -37,7 +38,7 @@ class PoolGaugesTest {
     private EtcdPoolConfigSource disabledSource(ManagedPool pool, DbProperties db, PoolCounters counters) {
         EtcdProperties etcd = new EtcdProperties();
         etcd.setEnabled(false);
-        return new EtcdPoolConfigSource(pool, db, etcd, event -> {}, counters);
+        return new EtcdPoolConfigSource(pool, db, etcd, event -> {}, counters, MechanismSpans.NOOP);
     }
 
     @Test

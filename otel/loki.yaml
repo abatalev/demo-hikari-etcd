@@ -1,0 +1,68 @@
+# Хранилище журналов стенда (Loki). Принимает журналы по OTLP/HTTP от точки приёма
+# (otel-collector), только из приложений: журналы инфраструктуры и stdout нагрузчика остаются
+# в docker compose logs — это вывод для человека, а не сигнал наблюдения.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  # Кольцо и правила в памяти: стенд одноузловой, координация между процессами ему не нужна.
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Сопутствующие данные (trace_id, span_id, уровень, поток, имя логгера, стек исключения)
+  # хранятся как структурированные данные, а не как метки строки: метки строки попадают в индекс,
+  # и имя логгера в метках строки размножило бы индекс по числу классов. Разбирать запись по
+  # trace_id можно и по сопутствующим данным. Само поле нельзя выключать: без него эти данные
+  # не сохранились бы вовсе.
+  allow_structured_metadata: true
+  # Срок хранения журналов. Проверяется не «память не растёт», а сам срок: сжатые фрагменты
+  # удаляются (compactor ниже), и старые записи перестают находиться запросом.
+  retention_period: 1h
+  otlp_config:
+    resource_attributes:
+      # Признаки инстанса и реплики становятся метками строки — по ним журнал ищется без разбора
+      # текста. Заданы явно: приложения кладут их в ресурс сигнала (service/group/node у сервиса,
+      # replica у провизёра), а не в атрибуты записи, поэтому индекс виден прямо в списке меток.
+      # Всё, чего здесь нет, остаётся сопутствующими данными и метками строки не становится.
+      attributes_config:
+        - action: index_label
+          attributes:
+            - service
+            - group
+            - node
+            - replica
+
+compactor:
+  working_directory: /loki/compactor
+  # Удаление по сроку включается явно: в Loki 3.x retention_period без compactor только помечает
+  # записи просроченными, а сами фрагменты продолжают занимать диск.
+  retention_enabled: true
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp

@@ -7,6 +7,11 @@
         </encoder>
     </appender>
 
+    <!-- Журналы уходят отправкой в otel-collector (→ Loki): вторая подписка на те же события
+         вешается кодом (OtelLogBridge) от провайдера журналов, который собирает Boot, —
+         Logback-конфигурация об этом не знает. Вывод в консоль остаётся прежним,
+         docker compose logs работает как раньше. -->
+
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
     </root>

@@ -27,6 +27,9 @@ PROM_PORT ?= 9090
 GRAFANA_PORT ?= 3000
 EXPORTER_PORT_A ?= 9187
 EXPORTER_PORT_B ?= 9188
+OTEL_METRICS_PORT ?= 9464
+TEMPO_PORT ?= 3200
+LOKI_PORT ?= 3100
 WAIT_S ?= 120
 # Нагрузка адресуется сервисом, но отдельной переменной: S= обязателен в командах etcd (там
 # сервис выбирает, что править, и молчаливый выбор опасен), а дефолтный S= убрал бы эту проверку.
@@ -41,11 +44,12 @@ LOAD_INSTANCE ?= $(call tuple_instance,$(word 1,$(foreach t,$(TUPLES),$(if $(fil
 TARGET ?= http://$(LOAD_LB):$(LB_TARGET_PORT)
 STATUS_TARGET ?= http://$(LOAD_INSTANCE):8080
 
-# --- список целей сбора метрик ---
-# Выводится из ETCD_INSTANCES: имя инстанса одновременно имя сервиса в compose, поэтому третья копия
-# списка инстансов в репозитории не появляется. Файл зафиксирован (сборщик поднимается и без make),
-# а make check-targets ловит расхождение.
-TARGETS_FILE ?= prometheus/targets.json
+# --- правила молчания инстанса ---
+# Список целей сбора удалён вместе с переходом на отправку: целей у сборщика теперь одна — точка
+# приёма, и молчание отдельного инстанса она не выражает. Вместо неё из того же ETCD_INSTANCES
+# выводится правило отсутствия ряда на каждый инстанс. Файл зафиксирован (сборщик поднимается и
+# без make), а make check-silence ловит расхождение.
+SILENCE_FILE ?= prometheus/rules/instances.yml
 # Список бэкендов распределителя выводится из ETCD_INSTANCES тем же способом, что и список целей
 # сбора, и проверяется той же командой в make test. Файл на стенд, а не на сервис: распределитель
 # один, и границу по сервису держит привязка маршрута к своей точке входа. Проверка заодно
@@ -55,7 +59,6 @@ BACKENDS_FILE ?= traefik/dynamic/fleet.yml
 # Временный файл сверки лежит ВНЕ каталога динамики: этот каталог смонтирован в балансировщик
 # целиком, и лишний файл в нём Traefik попытался бы прочитать как конфигурацию.
 BACKENDS_TMP ?= traefik/fleet.check
-METRICS_PORT ?= 8080
 
 # --- разбор кортежа s|g|i|port ---
 tuple_service  = $(word 1,$(subst |, ,$(1)))
@@ -143,13 +146,15 @@ instances: ## расклад инстансов: имя, порт, путь ко
 	@$(foreach t,$(TUPLES),printf "%-28s %-6s %s\n" "$(call tuple_instance,$(t))" "$(call tuple_port,$(t))" "$(call tuple_path,$(t))";)
 
 .PHONY: up
-up: prometheus-targets balancers ## поднять весь стенд и дождаться готовности всех инстансов и распределителей
+up: silence-rules balancers ## поднять весь стенд и дождаться готовности всех инстансов и распределителей
 	$(COMPOSE) up -d --build
 	@echo "--- ждём готовности всех инстансов и распределителя (до $(WAIT_S)с) ---"
 	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
-		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT_A) $(EXPORTER_PORT_B)
+		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT_A) $(EXPORTER_PORT_B) \
+		$(OTEL_METRICS_PORT) $(TEMPO_PORT) $(LOKI_PORT)
 	@$(MAKE) --no-print-directory pool
-	# Состояние целей — только сообщение: недоступность наблюдения не должна ронять make up
+	# Состав в наблюдении — только сообщение: недоступность наблюдения не должна ронять make up
+	-@$(MAKE) --no-print-directory check-instances
 	-@$(MAKE) --no-print-directory targets
 
 .PHONY: down
@@ -321,23 +326,27 @@ fleet-sessions: require-S ## держит ли флот бюджет: make fleet
 service-restart: ## перезапустить инстанс: make service-restart P=service-a-group-1-1
 	$(COMPOSE) restart $(P)
 
-.PHONY: prometheus-targets
-prometheus-targets: ## перегенерировать список целей сбора метрик из ETCD_INSTANCES
-	@mkdir -p $(dir $(TARGETS_FILE))
-	@python3 scripts/targets.py '$(TUPLES)' '$(METRICS_PORT)' '$(TARGETS_FILE)'
-	@echo "цели сбора: $(words $(TUPLES)) инстанс(ов) -> $(TARGETS_FILE)"
+.PHONY: silence-rules
+silence-rules: ## перегенерировать правила молчания инстанса из ETCD_INSTANCES
+	@mkdir -p $(dir $(SILENCE_FILE))
+	@python3 scripts/silence.py '$(TUPLES)' '$(SILENCE_FILE)'
+	@echo "правила молчания: $(words $(TUPLES)) инстанс(ов) -> $(SILENCE_FILE)"
 
-.PHONY: check-targets
-check-targets: ## сверить зафиксированный список целей сбора с ETCD_INSTANCES (входит в make test)
-	@mkdir -p $(dir $(TARGETS_FILE))
-	@python3 scripts/targets.py '$(TUPLES)' '$(METRICS_PORT)' '$(TARGETS_FILE).tmp'
-	@if diff -u '$(TARGETS_FILE)' '$(TARGETS_FILE).tmp' > /tmp/targets.diff; then \
-		rm -f '$(TARGETS_FILE).tmp'; \
-		echo "список целей совпадает с ETCD_INSTANCES ($(words $(TUPLES)))"; \
+.PHONY: check-silence
+check-silence: ## сверить зафиксированные правила молчания с ETCD_INSTANCES (входит в make test)
+	@mkdir -p $(dir $(SILENCE_FILE))
+	@python3 scripts/silence.py '$(TUPLES)' '$(SILENCE_FILE).tmp'
+	@if diff -u '$(SILENCE_FILE)' '$(SILENCE_FILE).tmp' > /tmp/silence.diff; then \
+		rm -f '$(SILENCE_FILE).tmp'; \
+		echo "правила молчания совпадают с ETCD_INSTANCES ($(words $(TUPLES)))"; \
 	else \
-		echo "список целей разошёлся с ETCD_INSTANCES:"; cat /tmp/targets.diff; \
-		echo "перегенерируй: make prometheus-targets"; rm -f '$(TARGETS_FILE).tmp'; exit 1; \
+		echo "правила молчания разошлись с ETCD_INSTANCES:"; cat /tmp/silence.diff; \
+		echo "перегенерируй: make silence-rules"; rm -f '$(SILENCE_FILE).tmp'; exit 1; \
 	fi
+
+.PHONY: check-instances
+check-instances: ## живая сверка состава: у каждого инстанса списка есть ряды в сборщике
+	@python3 scripts/check-instances.py '$(TUPLES)' 'http://127.0.0.1:$(PROM_PORT)'
 
 .PHONY: balancers
 balancers: ## перегенерировать список бэкендов распределителя из ETCD_INSTANCES
@@ -371,13 +380,24 @@ targets: ## состояние целей сбора метрик (нужен п
 		{ echo "сборщик метрик на порту $(PROM_PORT) не отвечает: docker compose ps prometheus"; \
 		  docker compose logs --tail=30 prometheus; exit 1; }
 
+.PHONY: door-config
+door-config: ## проверить конфигурацию двери сигналов (входит в make test)
+	@# Собственная проверка точки приёма: она разбирает конфигурацию и печатает использованные
+	@# компоненты. Ошибку в конфигурации она ловит на старте, и без этой проверки стенд
+	@# поднимался бы с молчащим отказом двери. У образа нет оболочки, поэтому --entrypoint.
+	$(COMPOSE) run --rm --no-deps -T --entrypoint /otelcol-contrib otel-collector \
+		validate --config=/etc/otel/collector.yaml
+
 .PHONY: test
 test: ## юнит-тесты сервиса и провизора, проверка целей сбора, конфигурации и правил
 	cd service && mvn -B -q test
 	cd provisioner && mvn -B -q test
-	@$(MAKE) --no-print-directory check-targets
+	@$(MAKE) --no-print-directory check-silence
 	@$(MAKE) --no-print-directory check-balancers
+	@$(MAKE) --no-print-directory door-config
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check rules /etc/prometheus/rules/stand.yml
+	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check rules /etc/prometheus/rules/instances.yml
 	# Правило обязано и молчать на норме, и срабатывать на нарушении: синтаксис этого не проверяет.
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus test rules /etc/prometheus/rules/stand.test.yml
+	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus test rules /etc/prometheus/rules/instances.test.yml

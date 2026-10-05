@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariConfigMXBean;
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.HikariPoolMXBean;
+import io.opentelemetry.api.common.AttributeKey;
 import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -22,6 +23,7 @@ import org.slf4j.LoggerFactory;
 
 import com.abatalev.demo.etcdhikari.service.metrics.HikariEventMetrics;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
+import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 
 /**
  * DataSource поверх HikariCP, который никогда не пересоздаётся "просто так".
@@ -46,6 +48,16 @@ public class ManagedPool implements DataSource, AutoCloseable {
     /** Сколько ждать, пока пул доберёт коннекты при увеличении (иначе добьёт HouseKeeper). */
     private static final Duration EAGER_FILL_TIMEOUT = Duration.ofSeconds(2);
 
+    /**
+     * Порог события ожидания выдачи соединения.
+     *
+     * <p>Ждать приходится и на пустом месте: единицы миллисекунд — обычное дело даже при свободном
+     * пуле. Такие ожидания событием не считаются, иначе под нагрузкой в трассы шёл бы поток
+     * бесполезных следов, а механизм наблюдения перестал бы быть разборным. Дальше этой границы
+     * ожидание — уже содержательный признак: либо пул насыщен, либо соединение создаётся.
+     */
+    private static final long ACQUIRE_TRACE_MIN_WAIT_MS = 25;
+
     private final long initializationFailTimeoutMs;
     private final boolean registerMbeans;
     private final boolean eagerFillOnResize;
@@ -56,6 +68,9 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     /** Приборы событий пула (SPI HikariCP); null — наблюдение выключено. */
     private final HikariEventMetrics eventMetrics;
+
+    /** Трассы событий механизма; NOOP — наблюдение выключено. */
+    private final MechanismSpans spans;
 
     private final AtomicReference<HikariDataSource> dataSource = new AtomicReference<>();
     private final AtomicReference<HikariSettings> applied = new AtomicReference<>();
@@ -122,11 +137,19 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
             boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters) {
+        this(defaults, initializationFailTimeoutMs, registerMbeans, eagerFillOnResize, drainTimeout, counters,
+                MechanismSpans.NOOP);
+    }
+
+    public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
+            boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
+            MechanismSpans spans) {
         this.initializationFailTimeoutMs = initializationFailTimeoutMs == null ? -1L : initializationFailTimeoutMs;
         this.registerMbeans = registerMbeans;
         this.eagerFillOnResize = eagerFillOnResize;
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
         this.counters = counters;
+        this.spans = spans == null ? MechanismSpans.NOOP : spans;
         this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
         HikariSettings.Normalized startup = defaults.normalize();
         startup.warnings().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
@@ -145,11 +168,52 @@ public class ManagedPool implements DataSource, AutoCloseable {
      */
     public ApplyResult apply(HikariSettings desired, String reason) {
         try {
-            return applyInternal(desired, reason);
+            // «Запрошено» пишется до нормализации и как есть: если конфиг отклонится, именно исходные
+            // значения и есть событие. Nullable-поля настроек переносятся как UNSET (-1), потому что
+            // ноль у них означает «пул снят», а не «не задано»: смешивать эти два смысла в признаке
+            // нельзя. Разыменование null здесь уронило бы apply() целиком — пул не создаётся.
+            return spans.callQuietly("pool.config.apply", b -> b
+                    .setAttribute("config.reason", reason)
+                    .setAttribute("pool.generation", generation.get())
+                    .setAttribute("pool.max.requested", orUnset(desired.maximumPoolSize()))
+                    .setAttribute("pool.min_idle.requested", orUnset(desired.minimumIdle()))
+                    // Прежний размер — тоже часть события: по требованию спеки переход виден в трассе
+                    // как «было -> стало», без обращения к журналу за второй половиной пары.
+                    .setAttribute("pool.max.before", maxBefore())
+                    .setAttribute("pool.min_idle.before", minIdleBefore()),
+                    span -> {
+                        ApplyResult result = applyInternal(desired, reason);
+                        // Итог дописывается в тот же span: решение и его исход — одно событие,
+                        // и по журналу видно ровно то же, что по трассе.
+                        span.setAttribute("config.outcome", result.outcome().name());
+                        span.setAttribute(AttributeKey.stringArrayKey("config.changes"),
+                                result.changes());
+                        HikariSettings now = result.settings();
+                        span.setAttribute("pool.max.after", now == null ? 0 : now.maximumPoolSize());
+                        span.setAttribute("pool.min_idle.after", now == null ? 0 : now.minimumIdle());
+                        span.setAttribute("pool.generation.after", generation.get());
+                        return result;
+                    });
         } finally {
             // Сигнал наружу: размер пула, поколение или долг изменились — публикация должна узнать.
             publishStateChange();
         }
+    }
+
+    /** Признак «не задано» для nullable-поля настроек: -1, потому что 0 у них значит «пул снят». */
+    private static int orUnset(Integer value) {
+        return value == null ? -1 : value;
+    }
+
+    /** Размер до применения: 0 — пула не было (или он уже был снят). */
+    private int maxBefore() {
+        HikariSettings current = applied.get();
+        return current == null ? 0 : orUnset(current.maximumPoolSize());
+    }
+
+    private int minIdleBefore() {
+        HikariSettings current = applied.get();
+        return current == null ? 0 : orUnset(current.minimumIdle());
     }
 
     private synchronized ApplyResult applyInternal(HikariSettings desired, String reason) {
@@ -280,7 +344,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
             // его соединения, иначе инстанс рапортует об освобождении, которого не было.
             beginDrain(ds, generation.get());
             try {
-                closeQuietly(ds);
+                closeQuietly(ds, "config_removed");
             } finally {
                 endDrain();
             }
@@ -408,7 +472,28 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
     }
 
+    /**
+     * Создание пула — либо первого, либо нового поколения вместо старого.
+     *
+     * <p>Пересоздание отдельным событием механизма: смена цели (jdbcUrl/креды/имя) единственный
+     * повод, при котором соединения уходят насильно, и именно это место разбора «куда делись
+     * соединения». Прежнее поколение дренируется здесь же, поэтому время события включает дренаж.
+     */
     private void create(HikariSettings settings, String reason) {
+        int previousGeneration = generation.get();
+        boolean replaced = dataSource.get() != null;
+        spans.runQuietly(replaced ? "pool.recreate" : "pool.create", b -> b
+                .setAttribute("config.reason", reason)
+                .setAttribute("pool.name", settings.poolName())
+                .setAttribute("pool.max", settings.maximumPoolSize())
+                .setAttribute("pool.min_idle", settings.minimumIdle())
+                .setAttribute("pool.generation.from", previousGeneration)
+                .setAttribute("pool.generation.to", previousGeneration + 1)
+                .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
+                () -> createPool(settings, reason, previousGeneration));
+    }
+
+    private void createPool(HikariSettings settings, String reason, int previousGeneration) {
         HikariConfig config = new HikariConfig();
         config.setPoolName(settings.poolName());
         config.setJdbcUrl(settings.jdbcUrl());
@@ -436,7 +521,6 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
         dataSource.set(fresh);
         applied.set(settings);
-        int previousGeneration = generation.get();
         generation.incrementAndGet();
         if (previous != null) {
             recreateCount.incrementAndGet();
@@ -444,7 +528,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
             // и обязаны попадать в наблюдение вместе с новыми.
             beginDrain(previous, previousGeneration);
             try {
-                closeQuietly(previous);
+                closeQuietly(previous, "recreate");
             } finally {
                 endDrain();
             }
@@ -469,8 +553,8 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
     }
 
-    private void closeQuietly(HikariDataSource ds) {
-        drain(ds);
+    private void closeQuietly(HikariDataSource ds, String cause) {
+        drain(ds, cause);
         try {
             ds.close();
         } catch (RuntimeException e) {
@@ -481,8 +565,12 @@ public class ManagedPool implements DataSource, AutoCloseable {
     /**
      * HikariCP закрывает активные соединения принудительно — запросы в полёте упадут с 08006.
      * Поэтому перед close() вытесняем idle и ждём (недолго), пока доработают активные.
+     *
+     * <p>Ожидание — событие механизма: по нему видно, сколько соединений держал уходящий пул и
+     * успел ли дренаж. Признак {@code pool.drain.cause} различает поводы: пересоздание, снятие
+     * конфигурации, остановка процесса — трафик они ломают по-разному.
      */
-    private void drain(HikariDataSource ds) {
+    private void drain(HikariDataSource ds, String cause) {
         if (drainTimeout.isZero() || ds.isClosed()) {
             return;
         }
@@ -494,17 +582,32 @@ public class ManagedPool implements DataSource, AutoCloseable {
             int active = pool.getActiveConnections();
             log.info("старый пул '{}' закрывается: ждём {} активных соединений (до {})",
                     ds.getPoolName(), active, drainTimeout);
-            pool.softEvictConnections();
-            long deadline = System.nanoTime() + drainTimeout.toNanos();
-            while (pool.getActiveConnections() > 0 && System.nanoTime() < deadline) {
-                Thread.sleep(20);
-            }
-            if (pool.getActiveConnections() > 0) {
-                log.warn("{} активных соединений не успели доработать за {} — закрываем принудительно",
-                        pool.getActiveConnections(), drainTimeout);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            spans.callQuietly("pool.drain", b -> b
+                    .setAttribute("pool.name", ds.getPoolName())
+                    .setAttribute("pool.drain.cause", cause)
+                    .setAttribute("pool.drain.active", active)
+                    .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
+                    span -> {
+                        try {
+                            pool.softEvictConnections();
+                            long deadline = System.nanoTime() + drainTimeout.toNanos();
+                            while (pool.getActiveConnections() > 0 && System.nanoTime() < deadline) {
+                                Thread.sleep(20);
+                            }
+                            int left = pool.getActiveConnections();
+                            span.setAttribute("pool.drain.left", left);
+                            span.setAttribute("pool.drain.timed_out", left > 0);
+                            if (left > 0) {
+                                log.warn("{} активных соединений не успели доработать за {} — закрываем принудительно",
+                                        left, drainTimeout);
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } catch (RuntimeException e) {
+                            log.debug("drain не удался: {}", e.toString());
+                        }
+                        return null;
+                    });
         } catch (RuntimeException e) {
             log.debug("drain не удался: {}", e.toString());
         }
@@ -588,7 +691,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
         if (ds != null) {
             beginDrain(ds, generation.get());
             try {
-                closeQuietly(ds);
+                closeQuietly(ds, "stop");
             } finally {
                 endDrain();
                 publishStateChange();
@@ -600,11 +703,31 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     @Override
     public Connection getConnection() throws SQLException {
-        return require().getConnection();
+        HikariDataSource ds = require();
+        // Замер ожидания идёт здесь, а не в контроллере: точку вызова знает только пул, и под
+        // нагрузкой очередь видна именно тут.
+        int awaitingBefore = ds.getHikariPoolMXBean().getThreadsAwaitingConnection();
+        long startNanos = System.nanoTime();
+        try {
+            return ds.getConnection();
+        } finally {
+            long waitedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            if (waitedMs >= ACQUIRE_TRACE_MIN_WAIT_MS) {
+                spans.event("pool.acquire.wait", b -> b
+                        .setAttribute("pool.name", ds.getPoolName())
+                        .setAttribute("pool.acquire.wait_ms", waitedMs)
+                        .setAttribute("pool.acquire.threads_awaiting", awaitingBefore)
+                        .setAttribute("pool.acquire.max", ds.getMaximumPoolSize())
+                        .setAttribute("pool.acquire.total", ds.getHikariPoolMXBean().getTotalConnections())
+                        .setAttribute("pool.acquire.idle", ds.getHikariPoolMXBean().getIdleConnections()));
+            }
+        }
     }
 
     @Override
     public Connection getConnection(String username, String password) throws SQLException {
+        // Выдача по логину и паролю пулом не применяется: путь оставлен как был, события ожидания
+        // здесь не заводятся — на стенде им не пользуются, а ждать их нечего.
         return require().getConnection(username, password);
     }
 

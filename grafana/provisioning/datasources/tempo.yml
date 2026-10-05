@@ -1,0 +1,38 @@
+apiVersion: 1
+
+# Источник данных трасс: трассы приложений и провизёра приходят в хранилище трасс через дверь
+# сигналов. UID зафиксирован: панели и переходы ссылаются на него по имени.
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # Признаки инстанса кладутся приложением в ресурс сигнала (service/group/node у сервиса,
+      # replica у провизёра), поэтому трасса ищется по ним прямо в поиске хранилища трасс.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+        # Отсутствующий на трассе признак в запрос не попадает: инстанс (node) и реплика (replica)
+        # в ресурсе трассы есть по отдельности, и переход работает для обоих.
+        tags:
+          - key: node
+            value: node
+          - key: replica
+            value: replica
+      # Обратный переход: из трассы в журналы того же инстанса по идентификатору трассы.
+      # Работает, потому что запись журнала внутри трассы несёт trace_id (см. OtelLogAppender).
+      logsToTraces:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+        tags:
+          - key: node
+            value: node
+          - key: replica
+            value: replica
