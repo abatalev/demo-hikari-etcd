@@ -18,8 +18,15 @@ public class PoolBeansConfiguration {
      * Пул создаётся только из конфигурации etcd: локальный дефолт максимума 0, поэтому при старте
      * пула нет вовсе. Первый принятый конфиг от провижера создаёт пул; нулевой целевой размер
      * (холодная группа, снятие конфигурации) закрывает его с дренажом.
+     *
+     * <p>{@code @Primary} обязателен: бин {@code dataSource} ниже отдаёт тот же объект, и как
+     * только он создан, Spring знает его фактический тип и считает его вторым кандидатом на
+     * {@code ManagedPool}. Без отметки контекст поднимался только потому, что потребители пула
+     * создавались раньше бина {@code dataSource} — при любом другом порядке регистрации старт падал
+     * на «found 2: managedPool,dataSource».
      */
     @Bean(destroyMethod = "close")
+    @Primary
     ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans) {
         return new ManagedPool(
                 properties.toSettings(),

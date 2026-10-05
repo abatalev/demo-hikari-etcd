@@ -1,4 +1,4 @@
-package com.abatalev.demo.etcdhikari.service.web;
+package com.abatalev.demo.etcdhikari.service.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;

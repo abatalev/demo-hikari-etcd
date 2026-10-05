@@ -467,7 +467,9 @@ openspec validate <name>                 # проверить артефакты
 service/       Spring Boot 3.5 + HikariCP + jetcd        (mvn test)
   pool/        ManagedPool, HikariSettings (валидация)   — сердце прототипа
   etcd/        EtcdPoolConfigSource (watch+гейт), EtcdKeys, EtcdKeyPath
-  web/         PoolController, TrafficGateFilter (503)
+  controller/  PoolController, TrafficGateFilter (503)  — только HTTP
+  service/     WorkService (сценарий замера)            — без HTTP и SQL
+  dao/         DemoItemsDao (count(*), pg_sleep)
   health/      EtcdConfigHealthIndicator (причина неготовности)
 provisioner/   два провизора с выборами лидера по сервису: сверка+watch, txn put_if_absent, GC ключей
 loadgen/       нагрузчик, Maven + Spring Boot (TARGET); логика в LoadGen.java
