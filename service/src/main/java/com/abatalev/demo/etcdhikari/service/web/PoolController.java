@@ -13,19 +13,15 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
-
 @RestController
 @RequestMapping("/api")
 public class PoolController {
 
     private static final Logger log = LoggerFactory.getLogger(PoolController.class);
 
-    private final ManagedPool pool;
     private final JdbcTemplate jdbc;
 
-    public PoolController(ManagedPool pool, JdbcTemplate jdbc) {
-        this.pool = pool;
+    public PoolController(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -33,14 +29,16 @@ public class PoolController {
      * Нагрузочная точка: берёт коннект из пула, делает запрос и держит его {@code ms} миллисекунд.
      * Именно на ней видно, как maximumPoolSize из etcd превращается в число сессий в postgres.
      *
-     * <p>Это единственная точка доменного API: состояние пула, конфигурации и источника наблюдается
-     * в метриках, трассах и журнале, а не здесь.
+     * <p>Это единственная точка доменного API, и она отвечает только измерениями: состояние пула,
+     * конфигурации и источника наблюдается в метриках, трассах и журнале, а не здесь. Второго
+     * источника состояния быть не должно — иначе одно и то же число читается двумя способами и
+     * даёт два значения, снятых в разные моменты.
      */
     @GetMapping("/work")
     public ResponseEntity<WorkResponse> work(@RequestParam(defaultValue = "20") long ms,
             @RequestParam(defaultValue = "true") boolean countRows) {
         if (ms < 0 || ms > 5000) {
-            return ResponseEntity.badRequest().body(new WorkResponse(false, 0, 0, 0, null, null, "ms должен быть 0..5000"));
+            return ResponseEntity.badRequest().body(new WorkResponse(false, 0, 0, 0, null, "ms должен быть 0..5000"));
         }
 
         long startNanos = System.nanoTime();
@@ -51,15 +49,13 @@ public class PoolController {
             long dbMs = (System.nanoTime() - dbStart) / 1_000_000;
             long totalMs = (System.nanoTime() - startNanos) / 1_000_000;
 
-            ManagedPool.Runtime runtime = pool.runtime();
             return ResponseEntity.ok(new WorkResponse(true, totalMs, dbMs, Math.max(0, totalMs - dbMs),
-                    rows, new PoolSnapshot(runtime.maximumPoolSize(), runtime.minimumIdle(), runtime.total(),
-                            runtime.active(), runtime.idle(), runtime.threadsAwaitingConnection()), null));
+                    rows, null));
         } catch (Exception e) {
             long totalMs = (System.nanoTime() - startNanos) / 1_000_000;
             log.debug("/api/work упал: {}", e.toString());
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(new WorkResponse(false, totalMs, 0, 0, null, null, e.getClass().getSimpleName() + ": " + e.getMessage()));
+                    .body(new WorkResponse(false, totalMs, 0, 0, null, e.getClass().getSimpleName() + ": " + e.getMessage()));
         }
     }
 
@@ -79,9 +75,6 @@ public class PoolController {
         });
     }
 
-    public record PoolSnapshot(int maximumPoolSize, int minimumIdle, int total, int active, int idle,
-            int threadsAwaitingConnection) {}
-
     public record WorkResponse(boolean ok, long durationMs, long dbMs, long queueWaitMs, Integer rows,
-            PoolSnapshot pool, String error) {}
+            String error) {}
 }

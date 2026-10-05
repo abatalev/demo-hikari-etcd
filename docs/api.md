@@ -22,23 +22,21 @@
   "durationMs": 50,
   "dbMs": 50,
   "queueWaitMs": 0,
-  "rows": 2000,
-  "pool": {
-    "maximumPoolSize": 25, "minimumIdle": 25,
-    "total": 25, "active": 4, "idle": 21,
-    "threadsAwaitingConnection": 0
-  }
+  "rows": 2000
 }
 ```
 
 | поле | что это |
 |---|---|
-| `ok` | `false` и HTTP 503, если не удалось взять коннект. Тело — с `error` вида `SQLTransientConnectionException: ... connection is not available, request timed out after 3000ms` |
+| `ok` | `false` и HTTP 503, если не удалось взять коннект. Тело — с `error` вида `CannotGetJdbcConnectionException: Failed to obtain JDBC Connection` |
 | `durationMs` | всё время с точки входа в эндпоинт |
 | `dbMs` | из них `pg_sleep`. Приблизительно равно `ms` |
 | `queueWaitMs` | `durationMs - dbMs`, то есть сколько запрос прождал свободный коннект. **Главная метрика:** `queueWaitMs` близко к нулю — пул справляется, растёт — упирается в размер |
 | `rows` | `count(*)` из `demo_items` (2000 строк). Отражает размер таблицы, а не нагрузку |
-| `pool` | снимок пула в момент ответа. Постоянное состояние пула снимается в метриках инстанса (`pool_*`), а нагрузчик этот снимок не читает |
+
+Состояния пула в ответе нет: ответ — измерение, а состояние снимается в метриках инстанса
+(`pool_*`) и в сводке `make pool`. Второго источника состояния намеренно не оставлено — иначе
+одно и то же число читалось бы двумя способами и давало два значения, снятых в разные моменты.
 
 **503 от гейта конфигурации (без входа в метод).** Пока инстанс не получил конфигурацию из etcd,
 `/api/work` отвечает отдельным фильтром `TrafficGateFilter` до контроллера:
@@ -47,7 +45,7 @@
 { "error": "конфигурация не получена: в пути /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/ нет распознанных ключей", "ok": false }
 ```
 
-Отличается от 503 перегруза тем, что `pool`, `durationMs`, `dbMs` отсутствуют целиком — запрос
+Отличается от 503 перегруза тем, что `durationMs`, `dbMs` и `rows` отсутствуют целиком — запрос
 не дошёл до пула. Наблюдение при этом работает: неготовый инстанс обязан быть наблюдаемым —
 `/actuator/prometheus` и `readiness` отдаются всегда, метрики `pool_traffic_gate_open` и
 `pool_not_ready_reason` показывают закрытый гейт.
