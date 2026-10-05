@@ -355,9 +355,8 @@ services:
         condition: service_healthy
     environment:
       <<: *loadgen-env
-      # TARGET — через балансировщик; STATUS_TARGET — стабильный инстанс для сводки пула
+      # TARGET — через балансировщик; состояние пула снимается в наблюдении, не здесь
       TARGET: http://lb:80
-      STATUS_TARGET: http://service-a-group-1-1:8080
 
   loadgen-b:
     <<: *loadgen
@@ -367,7 +366,6 @@ services:
     environment:
       <<: *loadgen-env
       TARGET: http://lb:81
-      STATUS_TARGET: http://service-b-group-1-1:8080
 
   # --- наблюдение: единая дверь сигналов и её хранилища, сборщик метрик, сборщик метрик базы,
   # витрина ---

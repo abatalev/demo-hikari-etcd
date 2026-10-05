@@ -4,7 +4,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -14,8 +13,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;
-import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 
 @RestController
@@ -24,45 +21,20 @@ public class PoolController {
 
     private static final Logger log = LoggerFactory.getLogger(PoolController.class);
 
-    private static final String SESSIONS_SQL = """
-            SELECT count(*)                                              AS sessions,
-                   count(*) FILTER (WHERE state = 'active')              AS active,
-                   count(*) FILTER (WHERE state = 'idle')                AS idle
-            FROM pg_stat_activity
-            WHERE application_name = ?
-            """;
-
     private final ManagedPool pool;
-    private final EtcdPoolConfigSource configSource;
     private final JdbcTemplate jdbc;
-    private final JdbcTemplate metaJdbc;
 
-    public PoolController(ManagedPool pool, EtcdPoolConfigSource configSource,
-            JdbcTemplate jdbc, @Qualifier("metaJdbcTemplate") JdbcTemplate metaJdbc) {
+    public PoolController(ManagedPool pool, JdbcTemplate jdbc) {
         this.pool = pool;
-        this.configSource = configSource;
         this.jdbc = jdbc;
-        this.metaJdbc = metaJdbc;
-    }
-
-    @GetMapping("/pool")
-    public PoolStatusResponse pool() {
-        HikariSettings settings = pool.settings();
-        return new PoolStatusResponse(
-                pool.runtime(),
-                settings == null ? null : settings.redacted(),
-                postgresSessions(),
-                configSource.status());
-    }
-
-    @GetMapping("/config")
-    public EtcdPoolConfigSource.EtcdStatus config() {
-        return configSource.status();
     }
 
     /**
      * Нагрузочная точка: берёт коннект из пула, делает запрос и держит его {@code ms} миллисекунд.
      * Именно на ней видно, как maximumPoolSize из etcd превращается в число сессий в postgres.
+     *
+     * <p>Это единственная точка доменного API: состояние пула, конфигурации и источника наблюдается
+     * в метриках, трассах и журнале, а не здесь.
      */
     @GetMapping("/work")
     public ResponseEntity<WorkResponse> work(@RequestParam(defaultValue = "20") long ms,
@@ -105,29 +77,6 @@ public class PoolController {
             }
             return null;
         });
-    }
-
-    private PoolStatusResponse.PostgresSessions postgresSessions() {
-        ManagedPool.Runtime runtime = pool.runtime();
-        if (runtime.closed()) {
-            return PoolStatusResponse.PostgresSessions.unavailable("пул закрыт");
-        }
-        if (runtime.idle() == 0) {
-            // пул насыщен — не занимаем его же последний коннект для интроспекции
-            return PoolStatusResponse.PostgresSessions.unavailable(
-                    "пропущено: свободных коннектов в пуле нет (active=" + runtime.active() + ")");
-        }
-        try {
-            return metaJdbc.query(SESSIONS_SQL, rs -> {
-                if (!rs.next()) {
-                    return PoolStatusResponse.PostgresSessions.unavailable("pg_stat_activity не вернул строк");
-                }
-                return new PoolStatusResponse.PostgresSessions(
-                        rs.getInt("sessions"), rs.getInt("active"), rs.getInt("idle"), null);
-            }, pool.runtime().poolName());
-        } catch (Exception e) {
-            return PoolStatusResponse.PostgresSessions.unavailable(e.getClass().getSimpleName() + ": " + e.getMessage());
-        }
     }
 
     public record PoolSnapshot(int maximumPoolSize, int minimumIdle, int total, int active, int idle,

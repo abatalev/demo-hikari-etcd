@@ -42,14 +42,6 @@ public class PoolBeansConfiguration {
         return new JdbcTemplate(dataSource);
     }
 
-    /** Для интроспекции (pg_stat_activity): свой таймаут, чтобы не висеть на насыщенном пуле. */
-    @Bean
-    JdbcTemplate metaJdbcTemplate(DataSource dataSource) {
-        JdbcTemplate template = new JdbcTemplate(dataSource);
-        template.setQueryTimeout(2);
-        return template;
-    }
-
     @Bean
     PlatformTransactionManager transactionManager(DataSource dataSource) {
         return new JdbcTransactionManager(dataSource);

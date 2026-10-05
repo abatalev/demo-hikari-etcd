@@ -775,7 +775,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             return metricName;
         }
 
-        /** Человеческий текст для API наблюдения. */
+        /** Человеческий текст причины: в теле 503 гейта и в деталях health. */
         public String describe(String path, String lastError) {
             return switch (this) {
                 case NO_CONFIG_KEYS -> "конфигурация не получена: в пути " + path + " нет распознанных ключей";

@@ -40,9 +40,7 @@ LOAD_S ?= $(call tuple_service,$(word 1,$(TUPLES)))
 LB_TARGET_PORT = $(if $(filter service-a,$(LOAD_S)),80,81)
 LB_HOST_PORT = $(if $(filter service-a,$(LOAD_S)),$(LB_A_PORT),$(LB_B_PORT))
 LOAD_LB ?= lb
-LOAD_INSTANCE ?= $(call tuple_instance,$(word 1,$(foreach t,$(TUPLES),$(if $(filter $(LOAD_S),$(call tuple_service,$(t))),$(t)))))
 TARGET ?= http://$(LOAD_LB):$(LB_TARGET_PORT)
-STATUS_TARGET ?= http://$(LOAD_INSTANCE):8080
 
 # --- правила молчания инстанса ---
 # Список целей сбора удалён вместе с переходом на отправку: целей у сборщика теперь одна — точка
@@ -179,9 +177,9 @@ load-logs: ## логи нагрузчика сервиса: make load-logs LOAD_
 
 .PHONY: stress
 stress: ## разовый прогон нагрузки на сервис (DURATION_S по умолчанию 20с): LOAD_S=service-b WORKERS=32 WORK_MS=200 make stress
-	@echo "нагрузка на $(LOAD_S) через $(LOAD_LB):$(LB_TARGET_PORT), инстанс для сводки: $(LOAD_INSTANCE)"
+	@echo "нагрузка на $(LOAD_S) через $(LOAD_LB):$(LB_TARGET_PORT)"
 	$(COMPOSE) run --rm --no-deps \
-		-e TARGET=$(TARGET) -e STATUS_TARGET=$(STATUS_TARGET) \
+		-e TARGET=$(TARGET) \
 		-e WORKERS=$(WORKERS) -e WORK_MS=$(WORK_MS) -e REPORT_MS=$(REPORT_MS) \
 		-e DURATION_S=$(if $(filter-out 0,$(DURATION_S)),$(DURATION_S),20) \
 		$(call loadgen_container,$(LOAD_S))
@@ -293,8 +291,9 @@ leader: ## кто ведёт каждый сервис (лидер выборо�
 		| python3 scripts/leaders.py
 
 .PHONY: pool
-pool: ## сводка по всем инстансам; make pool I=имя — детально один
-	@$(if $(filter command line,$(origin I)),curl -fsS http://localhost:$(call tuple_port,$(call tuple_by_I,$(I)))/api/pool | python3 -m json.tool,python3 scripts/pool-all.py '$(TUPLES)')
+pool: ## сводка по всем инстансам: готовность, пул из метрик, путь конфигурации и ключи в etcd
+	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+		| python3 scripts/pool-all.py '$(TUPLES)' '$(ETCD_ROOT)/' 'http://127.0.0.1:$(PROM_PORT)'
 
 .PHONY: work
 work: ## один запрос через балансировщик сервиса: make work LOAD_S=service-b

@@ -15,8 +15,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * Гейт трафика: пока конфигурация из etcd не получена, /api/work отвечает 503 в той же форме,
- * что и контроллер (WorkResponse), а наблюдение (/api/pool, /api/config, health) продолжает
- * работать — иначе неготовый инстанс не был бы виден.
+ * что и контроллер (WorkResponse), а наблюдение (метрики, health) продолжает работать — иначе
+ * неготовый инстанс не был бы виден.
  */
 @Component
 public class TrafficGateFilter extends OncePerRequestFilter {

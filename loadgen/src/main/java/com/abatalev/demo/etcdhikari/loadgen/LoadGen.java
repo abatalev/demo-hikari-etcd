@@ -18,18 +18,17 @@ import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Нагрузчик стенда: N виртуальных потоков долбят /api/work, репортер печатает
- * состояние пула (из /api/pool) вместе с rps/перцентилями.
+ * rps/перцентили вместе с ошибками и очередью.
  *
  * Только JDK: собирается одним файлом, тянется в стенд без maven.
- * Настройки через env: TARGET, STATUS_TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S.
- * STATUS_TARGET (дефолт = TARGET): откуда брать /api/pool для отчёта. Под балансировщиком
- * TARGET — это nginx, и сводка мигала бы между инстансами группы; задавая STATUS_TARGET
- * на конкретный инстанс, отчёт стабильно показывает один пул.
+ * Настройки через env: TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S.
+ * Состояние пула и сессий базы в отчёт не входят: оно снимается в наблюдении стенда (метрики
+ * инстанса и сборщика базы), поэтому отчёт не зависит ни от одной точки наблюдения и печатается
+ * одинаково при любом состоянии пула.
  */
 public final class LoadGen {
 
     private static final String TARGET = env("TARGET", "http://localhost:8080");
-    private static final String STATUS_TARGET = env("STATUS_TARGET", TARGET);
     private static final int WORKERS = (int) envLong("WORKERS", 4);
     private static final long WORK_MS = envLong("WORK_MS", 25);
     private static final long THINK_MS = envLong("THINK_MS", 0);
@@ -79,12 +78,6 @@ public final class LoadGen {
     private static final AtomicBoolean SUMMARY_PRINTED = new AtomicBoolean();
     private static final long START_NANOS = System.nanoTime();
 
-    /** Отдельный клиент для служебных запросов /api/pool, чтобы не мешать замеру нагрузки. */
-    private static final HttpClient META = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(3))
-            .version(HttpClient.Version.HTTP_1_1)
-            .build();
-
     public static void main(String[] args) throws Exception {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
@@ -92,9 +85,9 @@ public final class LoadGen {
                 .build();
 
         System.out.printf(Locale.ROOT,
-                "loadgen -> %s (status -> %s) | workers=%d work=%dms think=%dms report=%dms duration=%s%n",
-                TARGET, STATUS_TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S == 0 ? "∞" : DURATION_S + "s");
-        System.out.println("колонки: rps p50 p95 max inflight ok err | пул: max total active idle waiting | pg: sessions active idle");
+                "loadgen -> %s | workers=%d work=%dms think=%dms report=%dms duration=%s%n",
+                TARGET, WORKERS, WORK_MS, THINK_MS, REPORT_MS, DURATION_S == 0 ? "∞" : DURATION_S + "s");
+        System.out.println("колонки: rps p50 p95 max inflight ok err");
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(TARGET + "/api/work?ms=" + WORK_MS))
@@ -156,7 +149,7 @@ public final class LoadGen {
         }
     }
 
-    /** Печатает строку состояния: нагрузка + пул + сессии postgres. */
+    /** Печатает строку состояния нагрузки: скорость, перцентили, очередь, ошибки. */
     private static void reportLoop(CountDownLatch stop) {
         long windowStart = System.nanoTime();
         long windowRequests = 0;
@@ -179,103 +172,11 @@ public final class LoadGen {
 
             long[] p = LATENCIES.percentiles();
 
-            String pool = "n/a";
-            String pg = "n/a";
-            try {
-                // один запрос на окно: /api/pool отдаёт и состояние пула, и сессии postgres
-                String json = fetchPoolJson();
-                pool = formatPool(section(json, "pool"));
-                pg = formatSessions(section(json, "postgres"));
-            } catch (IOException e) {
-                pool = "n/a (не долетел /api/pool)";
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-
             System.out.printf(Locale.ROOT,
-                    "[t=%3ds] rps=%-5d p50=%-4d p95=%-4d max=%-4d inflight=%-3d ok=%-7d err=%-4d | pool: %s | pg: %s%n",
+                    "[t=%3ds] rps=%-5d p50=%-4d p95=%-4d max=%-4d inflight=%-3d ok=%-7d err=%-4d%n",
                     (int) (elapsedMs() / 1000), rps, p[0], p[1], p[2], INFLIGHT.get(),
-                    OK.sum(), ERRORS.sum(), pool, pg);
+                    OK.sum(), ERRORS.sum());
         }
-    }
-
-    private static String formatPool(String pool) {
-        return String.format(Locale.ROOT, "max=%s total=%s active=%s idle=%s waiting=%s",
-                num(pool, "maximumPoolSize"), num(pool, "total"), num(pool, "active"),
-                num(pool, "idle"), num(pool, "threadsAwaitingConnection"));
-    }
-
-    private static String formatSessions(String pg) {
-        String error = optionalString(pg, "error");
-        if (error != null) {
-            return "n/a (" + error + ")";
-        }
-        return String.format(Locale.ROOT, "sessions=%s active=%s idle=%s",
-                num(pg, "sessions"), num(pg, "active"), num(pg, "idle"));
-    }
-
-    private static String fetchPoolJson() throws IOException, InterruptedException {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(STATUS_TARGET + "/api/pool"))
-                .timeout(Duration.ofSeconds(5))
-                .GET()
-                .build();
-        return META.send(request, HttpResponse.BodyHandlers.ofString()).body();
-    }
-
-    /** Вырезает значение объекта по имени с учётом вложенности (скобки). */
-    private static String section(String json, String name) {
-        int start = json.indexOf("\"" + name + "\":");
-        if (start < 0) {
-            return "";
-        }
-        int open = json.indexOf('{', start);
-        if (open < 0) {
-            return "";
-        }
-        int depth = 0;
-        for (int i = open; i < json.length(); i++) {
-            char c = json.charAt(i);
-            if (c == '{') {
-                depth++;
-            } else if (c == '}') {
-                if (--depth == 0) {
-                    return json.substring(open, i + 1);
-                }
-            }
-        }
-        return json.substring(open);
-    }
-
-    private static String num(String json, String field) {
-        return optionalString(json, field) == null ? "?" : optionalString(json, field);
-    }
-
-    /** Значение поля или null, если поля нет (в JSON его могло выкинуть non_null-политика). */
-    private static String optionalString(String json, String field) {
-        int at = json.indexOf("\"" + field + "\":");
-        if (at < 0) {
-            return null;
-        }
-        int i = at + field.length() + 3;
-        while (i < json.length() && json.charAt(i) == ' ') {
-            i++;
-        }
-        if (i >= json.length()) {
-            return null;
-        }
-        char c = json.charAt(i);
-        if (c == '"' || c == '{' || c == '[') {
-            char close = c == '"' ? '"' : (c == '{' ? '}' : ']');
-            int end = json.indexOf(close, i + 1);
-            return end > 0 ? json.substring(i, end + 1) : null;
-        }
-        int end = i;
-        while (end < json.length() && "-0123456789.".indexOf(json.charAt(end)) >= 0) {
-            end++;
-        }
-        return end > i ? json.substring(i, end) : null;
     }
 
     private static void printSummary() {

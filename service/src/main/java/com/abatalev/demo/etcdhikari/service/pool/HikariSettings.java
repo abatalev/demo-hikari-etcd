@@ -126,7 +126,7 @@ public record HikariSettings(
                 && java.util.Objects.equals(poolName, other.poolName);
     }
 
-    /** Список изменений вида "maximumPoolSize: 10 -> 20" для логов и API. */
+    /** Список изменений вида "maximumPoolSize: 10 -> 20" для логов и признаков трассы. */
     public List<String> diff(HikariSettings other) {
         List<String> out = new ArrayList<>();
         addDiff(out, "maximumPoolSize", maximumPoolSize, other.maximumPoolSize);
@@ -151,7 +151,7 @@ public record HikariSettings(
         }
     }
 
-    /** Настройки без пароля — для /api/config и логов. */
+    /** Настройки без пароля — для журнала и признаков трассы. */
     public HikariSettings redacted() {
         String p = password;
         if (p != null && !p.isEmpty()) {
