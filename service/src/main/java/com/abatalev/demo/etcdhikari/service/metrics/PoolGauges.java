@@ -1,7 +1,7 @@
 package com.abatalev.demo.etcdhikari.service.metrics;
 
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;
-import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
+import com.abatalev.demo.etcdhikari.service.pool.PoolSize;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -86,11 +86,12 @@ public class PoolGauges {
 
         // Применённая конфигурация: по ней виден целевой потолок, даже когда пул уже снят.
         gauge(registry, "pool.config.maximum_pool_size", "применённый потолок из конфигурации etcd",
-                () -> settings() == null ? 0 : settings().maximumPoolSize());
+                () -> size() == null ? 0 : size().maximumPoolSize());
         gauge(registry, "pool.config.minimum_idle", "применённый минимум idle из конфигурации etcd",
-                () -> settings() == null ? 0 : settings().minimumIdle());
-        gauge(registry, "pool.config.connection_timeout_ms", "применённый таймаут ожидания соединения, мс",
-                () -> settings() == null ? 0L : settings().connectionTimeoutMs());
+                () -> size() == null ? 0 : size().minimumIdle());
+        // Таймаут ожидания соединения из etcd не приходит: это локальное значение процесса.
+        gauge(registry, "pool.config.connection_timeout_ms", "таймаут ожидания соединения из локальной конфигурации, мс",
+                () -> pool.connectionTimeoutMs());
     }
 
     private void registerSourceGauges(MeterRegistry registry) {
@@ -147,8 +148,8 @@ public class PoolGauges {
         return pool.runtime();
     }
 
-    private HikariSettings settings() {
-        return pool.settings();
+    private PoolSize size() {
+        return pool.size();
     }
 
     /**

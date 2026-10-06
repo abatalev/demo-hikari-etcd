@@ -46,7 +46,7 @@ public class ProvisionerProperties {
     private int inactiveMaxConnections = 1;
 
     /**
-     * Верхняя граница доли инстанса. Намеренно зеркалит {@code HikariSettings.POOL_SIZE_MAX} у
+     * Верхняя граница доли инстанса. Намеренно зеркалит {@code PoolSize.POOL_SIZE_MAX} у
      * сервиса: доля выше границы усекается, иначе сервис отклонил бы конфиг целиком.
      */
     private int maxShare = 200;

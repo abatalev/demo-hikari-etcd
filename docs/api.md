@@ -122,7 +122,7 @@ hikaricp_connections_acquire_seconds_count{…} 182
 | группа | метрики |
 |---|---|
 | размер и состояние пула | `pool_maximum_pool_size`, `pool_minimum_idle`, `pool_generation`, `pool_closing`, `pool_connections_{open,busy,idle,awaiting}`, `pool_evictable_idle`, `pool_unreleased_shrink` |
-| применённая конфигурация | `pool_config_{maximum_pool_size,minimum_idle,connection_timeout_ms}` — **только применённые величины**, без значений из etcd |
+| применённая конфигурация | `pool_config_{maximum_pool_size,minimum_idle}` — величины, пришедшие из etcd; `pool_config_connection_timeout_ms` — локальное значение процесса, из etcd не приходит и потому постоянно |
 | состояние конфигурации | `pool_config_state{state=none\|applied\|rejected}`, `pool_config_{applied,rejected,unreadable}_total`, `pool_resize_{grow,shrink}_total`, `pool_recreate_total` |
 | гейт и etcd | `pool_traffic_gate_open`, `pool_not_ready_reason{reason=none\|no_config_keys\|etcd_unavailable}`, `pool_etcd_{enabled,connected,watch_active,revision,problems}` |
 | события пула (SPI HikariCP) | `hikaricp_connections_{acquire,usage,creation}_seconds` (гистограммы, границы заданы в коде), `hikaricp_connections_timeout_total` |

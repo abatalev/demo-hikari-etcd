@@ -21,6 +21,7 @@ import java.util.logging.Logger;
 import javax.sql.DataSource;
 import org.slf4j.LoggerFactory;
 
+import com.abatalev.demo.etcdhikari.service.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.HikariEventMetrics;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
 import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
@@ -30,13 +31,13 @@ import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
  *
  * <p>Из etcd приходит только размер, он применяется на живой пул через {@link HikariConfigMXBean}.
  * Пересоздание — единственный выход из закрытого состояния: пул сняли нулевым размером, пришла
- * ненулевая доля. Сменить цель соединения (jdbcUrl/логин/пароль/имя пула) на живом пуле нечем:
- * она приходит из локальной конфигурации процесса, а MBean её всё равно не принимает.
+ * ненулевая доля. Сменить цель соединения на живом пуле нечем: она задана локально
+ * ({@link DbProperties}) на весь процесс, а MBean её всё равно не принимает.
  *
- * <p>Размер пула задаётся только конфигурацией из etcd: локальный дефолт максимума 0, и пул не
- * создаётся, пока не пришёл первый конфиг. Целевой максимум 0 (резерв холодной группы, снятие
- * конфигурации) честно закрывает пул с дренажом активных соединений — {@code dataSource}
- * становится {@code null}, а память о последнем конфиге остаётся в {@link #applied}.
+ * <p>Локального размера пула нет вовсе: пул не создаётся, пока не пришёл первый конфиг из etcd.
+ * Целевой максимум 0 (резерв холодной группы, снятие конфигурации) честно закрывает пул с дренажом
+ * активных соединений — {@code dataSource} становится {@code null}, а память о последнем размере
+ * остаётся в {@link #applied}.
  *
  * <p>Инстанс намеренно реализует {@link DataSource}, а не отдаёт {@code HikariDataSource} наружу:
  * тогда {@code JdbcTemplate} и менеджер транзакций Spring следуют за подменой пула сами.
@@ -59,8 +60,9 @@ public class ManagedPool implements DataSource, AutoCloseable {
      */
     private static final long ACQUIRE_TRACE_MIN_WAIT_MS = 25;
 
-    private final long initializationFailTimeoutMs;
-    private final boolean registerMbeans;
+    /** Цель соединения и таймауты: локальны на весь процесс, из etcd не приходят. */
+    private final DbProperties db;
+
     private final boolean eagerFillOnResize;
     private final Duration drainTimeout;
 
@@ -74,7 +76,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
     private final MechanismSpans spans;
 
     private final AtomicReference<HikariDataSource> dataSource = new AtomicReference<>();
-    private final AtomicReference<HikariSettings> applied = new AtomicReference<>();
+    private final AtomicReference<PoolSize> applied = new AtomicReference<>();
     private final AtomicReference<String> lastReason = new AtomicReference<>("startup");
     private final AtomicLong lastChangeAt = new AtomicLong(System.currentTimeMillis());
     private final AtomicLong createdAt = new AtomicLong();
@@ -136,30 +138,22 @@ public class ManagedPool implements DataSource, AutoCloseable {
         return appliedVersion;
     }
 
-    public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
-            boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters) {
-        this(defaults, initializationFailTimeoutMs, registerMbeans, eagerFillOnResize, drainTimeout, counters,
-                MechanismSpans.NOOP);
-    }
-
-    public ManagedPool(HikariSettings defaults, Long initializationFailTimeoutMs, boolean registerMbeans,
-            boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
+    /**
+     * Пул не создаётся на старте: размера нет ни в etcd, ни локально, поэтому и ждать нечего.
+     * Локальная конфигурация проверяется сразу — иначе неверный таймаут всплыл бы через событие
+     * etcd и выглядел бы отказом провизёра, а не собственной ошибкой процесса.
+     */
+    public ManagedPool(DbProperties db, boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
             MechanismSpans spans) {
-        this.initializationFailTimeoutMs = initializationFailTimeoutMs == null ? -1L : initializationFailTimeoutMs;
-        this.registerMbeans = registerMbeans;
+        this.db = db;
         this.eagerFillOnResize = eagerFillOnResize;
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
         this.counters = counters;
         this.spans = spans == null ? MechanismSpans.NOOP : spans;
         this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
-        HikariSettings.Normalized startup = defaults.normalize();
-        startup.warnings().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
-        if (startup.settings().maximumPoolSize() > 0) {
-            create(startup.settings(), "startup", false);
-        } else {
-            log.info("локальный максимум пула = 0: пул не создан, размер придёт из конфигурации etcd");
-            lastReason.set("startup: пула нет (размер 0, ждём конфигурацию из etcd)");
-        }
+        db.validate().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
+        log.info("размер пула приходит только из etcd: локального размера нет, пул не создан");
+        lastReason.set("startup: пула нет (ждём конфигурацию из etcd)");
     }
 
     /**
@@ -167,11 +161,11 @@ public class ManagedPool implements DataSource, AutoCloseable {
      *
      * @return что именно произошло: пул создан, пересоздан, ресайзнут, закрыт или конфиг не изменился
      */
-    public ApplyResult apply(HikariSettings desired, String reason) {
+    public ApplyResult apply(PoolSize desired, String reason) {
         try {
             // «Запрошено» пишется до нормализации и как есть: если конфиг отклонится, именно исходные
-            // значения и есть событие. Nullable-поля настроек переносятся как UNSET (-1), потому что
-            // ноль у них означает «пул снят», а не «не задано»: смешивать эти два смысла в признаке
+            // значения и есть событие. Размер nullable, поэтому «не задано» пишется как UNSET (-1):
+            // ноль у него означает «пул снят», а не «не задано», и смешивать эти два смысла в признаке
             // нельзя. Разыменование null здесь уронило бы apply() целиком — пул не создаётся.
             return spans.callQuietly("pool.config.apply", b -> b
                     .setAttribute("config.reason", reason)
@@ -189,7 +183,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
                         span.setAttribute("config.outcome", result.outcome().name());
                         span.setAttribute(AttributeKey.stringArrayKey("config.changes"),
                                 result.changes());
-                        HikariSettings now = result.settings();
+                        PoolSize now = result.size();
                         span.setAttribute("pool.max.after", now == null ? 0 : now.maximumPoolSize());
                         span.setAttribute("pool.min_idle.after", now == null ? 0 : now.minimumIdle());
                         span.setAttribute("pool.generation.after", generation.get());
@@ -201,38 +195,39 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
     }
 
-    /** Признак «не задано» для nullable-поля настроек: -1, потому что 0 у них значит «пул снят». */
+    /** Признак «не задано» для nullable-размера: -1, потому что 0 у него значит «пул снят». */
     private static int orUnset(Integer value) {
         return value == null ? -1 : value;
     }
 
     /** Размер до применения: 0 — пула не было (или он уже был снят). */
     private int maxBefore() {
-        HikariSettings current = applied.get();
+        PoolSize current = applied.get();
         return current == null ? 0 : orUnset(current.maximumPoolSize());
     }
 
     private int minIdleBefore() {
-        HikariSettings current = applied.get();
+        PoolSize current = applied.get();
         return current == null ? 0 : orUnset(current.minimumIdle());
     }
 
-    private synchronized ApplyResult applyInternal(HikariSettings desired, String reason) {
-        HikariSettings target;
+    private synchronized ApplyResult applyInternal(PoolSize desired, String reason) {
+        PoolSize target;
         List<String> warnings;
         try {
-            HikariSettings.Normalized normalized = desired.normalize();
-            target = normalized.settings();
-            warnings = normalized.warnings();
+            PoolSize.Normalized normalized = desired.normalize();
+            target = normalized.size();
+            warnings = new ArrayList<>(normalized.warnings());
+            warnings.addAll(db.warningsFor(target));
         } catch (InvalidSettingsException e) {
-            HikariSettings appliedSettings = applied.get();
+            PoolSize appliedSize = applied.get();
             count(c -> c.configRejected());
             log.error("[{}] конфиг отклонён ({}), остаёмся на предыдущих значениях: {}",
-                    reason, e.getMessage(), appliedSettings == null ? "<пула нет>" : appliedSettings.redacted());
+                    reason, e.getMessage(), appliedSize == null ? "<пула нет>" : appliedSize);
             return new ApplyResult(Outcome.REJECTED, List.of("rejected: " + e.getMessage()), null);
         }
 
-        HikariSettings current = applied.get();
+        PoolSize current = applied.get();
         if (target.maximumPoolSize() == 0) {
             // Снятие пула (холодная группа R=0, инстанс без доли). Дренаж обязателен:
             // HikariDataSource.close() убивает активные соединения и ломает запросы в полёте.
@@ -244,7 +239,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
 
         if (current == null) {
-            // Пула ещё нет (старт с локальным максимумом 0): первый принятый конфиг создаёт его.
+            // Пула ещё нет: первый принятый конфиг создаёт его.
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
             create(target, reason, false);
             count(c -> c.configApplied());
@@ -253,10 +248,9 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
         HikariDataSource ds = dataSource.get();
         if (ds == null) {
-            // Пул был закрыт (нулевой целевой размер), память о последнем конфиге осталась в applied:
-            // поднимаем пул заново. Это единственный путь пересоздания: цель соединения (jdbcUrl,
-            // креды, имя пула) приходит только из локальной конфигурации, изменить её на живом пуле
-            // нечем, а MBean такие параметры всё равно не меняет.
+            // Пул был закрыт (нулевой целевой размер), память о последнем размере осталась в applied:
+            // поднимаем пул заново. Это единственный путь пересоздания: цель соединения задана
+            // локально и на живом пуле не меняется, а MBean такие параметры всё равно не принимает.
             List<String> changes = current.diff(target);
             warnings.forEach(w -> log.warn("[{}] нормализация конфига: {}", reason, w));
             create(target, reason, true);
@@ -286,7 +280,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
         lastReason.set(reason);
         lastChangeAt.set(System.currentTimeMillis());
         log.info("[{}] пул '{}' обновлён на лету: {} | now: max={} minIdle={} total={}",
-                reason, target.poolName(), String.join(", ", changes), target.maximumPoolSize(),
+                reason, db.getPoolName(), String.join(", ", changes), target.maximumPoolSize(),
                 target.minimumIdle(), runtime().total());
         return new ApplyResult(Outcome.RESIZED, changes, target);
     }
@@ -337,7 +331,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     /** Честное закрытие пула (целевой максимум 0): дренаж активных, потом close. */
-    private ApplyResult closePool(HikariSettings target, HikariSettings current, String reason) {
+    private ApplyResult closePool(PoolSize target, PoolSize current, String reason) {
         HikariDataSource ds = dataSource.getAndSet(null);
         if (ds != null) {
             // Поколение уходит в дренаж ДО закрытия: пока идёт дренаж, наблюдение обязано видеть
@@ -349,7 +343,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
                 endDrain();
             }
             log.info("[{}] пул '{}' закрыт: размер {} -> 0, активные соединения дренированы",
-                    reason, target.poolName(), current.maximumPoolSize());
+                    reason, db.getPoolName(), current.maximumPoolSize());
         }
         applied.set(target);
         count(c -> c.configApplied());
@@ -372,7 +366,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     /** Порядок важен: при уменьшении сначала minimumIdle, иначе получим minIdle > max. */
-    private void applyOnLivePool(HikariSettings from, HikariSettings to, String reason) {
+    private void applyOnLivePool(PoolSize from, PoolSize to, String reason) {
         HikariDataSource ds = dataSource.get();
         HikariConfigMXBean mx = ds.getHikariConfigMXBean();
         boolean shrinking = to.maximumPoolSize() < from.maximumPoolSize();
@@ -384,17 +378,6 @@ public class ManagedPool implements DataSource, AutoCloseable {
             setMaximumPoolSize(mx, from, to, reason);
             setMinimumIdle(mx, from, to, reason);
         }
-
-        setQuietly(reason, "connectionTimeoutMs", from.connectionTimeoutMs(), to.connectionTimeoutMs(),
-                () -> mx.setConnectionTimeout(to.connectionTimeoutMs()));
-        setQuietly(reason, "idleTimeoutMs", from.idleTimeoutMs(), to.idleTimeoutMs(),
-                () -> mx.setIdleTimeout(to.idleTimeoutMs()));
-        setQuietly(reason, "maxLifetimeMs", from.maxLifetimeMs(), to.maxLifetimeMs(),
-                () -> mx.setMaxLifetime(to.maxLifetimeMs()));
-        setQuietly(reason, "validationTimeoutMs", from.validationTimeoutMs(), to.validationTimeoutMs(),
-                () -> mx.setValidationTimeout(to.validationTimeoutMs()));
-        setQuietly(reason, "leakDetectionThresholdMs", from.leakDetectionThresholdMs(), to.leakDetectionThresholdMs(),
-                () -> mx.setLeakDetectionThreshold(to.leakDetectionThresholdMs()));
 
         if (shrinking) {
             // лимит применился сразу, а лишние idle-коннекты иначе висели бы до следующего
@@ -412,11 +395,11 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
     }
 
-    private void setMinimumIdle(HikariConfigMXBean mx, HikariSettings from, HikariSettings to, String reason) {
+    private void setMinimumIdle(HikariConfigMXBean mx, PoolSize from, PoolSize to, String reason) {
         setQuietly(reason, "minimumIdle", from.minimumIdle(), to.minimumIdle(), () -> mx.setMinimumIdle(to.minimumIdle()));
     }
 
-    private void setMaximumPoolSize(HikariConfigMXBean mx, HikariSettings from, HikariSettings to, String reason) {
+    private void setMaximumPoolSize(HikariConfigMXBean mx, PoolSize from, PoolSize to, String reason) {
         setQuietly(reason, "maximumPoolSize", from.maximumPoolSize(), to.maximumPoolSize(),
                 () -> mx.setMaximumPoolSize(to.maximumPoolSize()));
     }
@@ -439,7 +422,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
      * HikariCP отдаст то же самое idle-соединение и новое не создаст.
      * Дедлайн нужен, чтобы не блокировать watch, если пул занят нагрузкой.
      */
-    private void eagerFill(HikariSettings target, String reason) {
+    private void eagerFill(PoolSize target, String reason) {
         HikariDataSource ds = dataSource.get();
         int before = runtime().total();
         if (before >= target.maximumPoolSize()) {
@@ -483,36 +466,23 @@ public class ManagedPool implements DataSource, AutoCloseable {
      * имена событий механизма и разная строка в журнале, потому что разбор «куда делись соединения»
      * смотрит именно на второй случай.
      */
-    private void create(HikariSettings settings, String reason, boolean recreation) {
+    private void create(PoolSize size, String reason, boolean recreation) {
         int previousGeneration = generation.get();
         spans.runQuietly(recreation ? "pool.recreate" : "pool.create", b -> b
                 .setAttribute("config.reason", reason)
-                .setAttribute("pool.name", settings.poolName())
-                .setAttribute("pool.max", settings.maximumPoolSize())
-                .setAttribute("pool.min_idle", settings.minimumIdle())
+                .setAttribute("pool.name", db.getPoolName())
+                .setAttribute("pool.max", size.maximumPoolSize())
+                .setAttribute("pool.min_idle", size.minimumIdle())
                 .setAttribute("pool.generation.from", previousGeneration)
                 .setAttribute("pool.generation.to", previousGeneration + 1)
                 .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
-                () -> createPool(settings, reason, recreation));
+                () -> createPool(size, reason, recreation));
     }
 
-    private void createPool(HikariSettings settings, String reason, boolean recreation) {
-        HikariConfig config = new HikariConfig();
-        config.setPoolName(settings.poolName());
-        config.setJdbcUrl(settings.jdbcUrl());
-        config.setUsername(settings.username());
-        config.setPassword(settings.password());
-        config.setMaximumPoolSize(settings.maximumPoolSize());
-        config.setMinimumIdle(settings.minimumIdle());
-        config.setConnectionTimeout(settings.connectionTimeoutMs());
-        config.setIdleTimeout(settings.idleTimeoutMs());
-        config.setMaxLifetime(settings.maxLifetimeMs());
-        config.setValidationTimeout(settings.validationTimeoutMs());
-        config.setLeakDetectionThreshold(settings.leakDetectionThresholdMs());
-        config.setInitializationFailTimeout(initializationFailTimeoutMs);
-        config.setRegisterMbeans(registerMbeans);
-        // чтобы считать свои сессии в pg_stat_activity
-        config.addDataSourceProperty("ApplicationName", settings.poolName());
+    private void createPool(PoolSize size, String reason, boolean recreation) {
+        // Конфигурация HikariCP собирается в одном месте (DbProperties.toHikariConfig): локальные
+        // значения и размер из etcd, без промежуточной модели, которая могла бы с ними разойтись.
+        HikariConfig config = db.toHikariConfig(size);
         // События пула (ожидание выдачи, удержание, открытие, таймауты) — единственное место, где
         // пул рождается, поэтому прибор подключается здесь и не наследует прошлых поколений.
         if (eventMetrics != null) {
@@ -522,7 +492,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
         HikariDataSource fresh = new HikariDataSource(config);
 
         dataSource.set(fresh);
-        applied.set(settings);
+        applied.set(size);
         generation.incrementAndGet();
         createdAt.set(System.currentTimeMillis());
         lastChangeAt.set(System.currentTimeMillis());
@@ -530,11 +500,11 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
         if (recreation) {
             log.info("[{}] HikariCP '{}' создан заново после снятия конфигурации: max={} minIdle={}",
-                    reason, settings.poolName(), settings.maximumPoolSize(), settings.minimumIdle());
+                    reason, db.getPoolName(), size.maximumPoolSize(), size.minimumIdle());
         } else {
             log.info("[{}] HikariCP '{}' создан: jdbc={} user={} max={} minIdle={} connectionTimeout={}ms",
-                    reason, settings.poolName(), settings.jdbcUrl(), settings.username(),
-                    settings.maximumPoolSize(), settings.minimumIdle(), settings.connectionTimeoutMs());
+                    reason, db.getPoolName(), db.getJdbcUrl(), db.getUsername(),
+                    size.maximumPoolSize(), size.minimumIdle(), db.getConnectionTimeoutMs());
         }
     }
 
@@ -605,8 +575,14 @@ public class ManagedPool implements DataSource, AutoCloseable {
         }
     }
 
-    public HikariSettings settings() {
+    /** Применённый размер пула; null — конфигурация ещё не приходила. */
+    public PoolSize size() {
         return applied.get();
+    }
+
+    /** Таймаут ожидания соединения: локальное значение, из etcd не приходит. */
+    public long connectionTimeoutMs() {
+        return db.getConnectionTimeoutMs();
     }
 
     public Runtime runtime() {
@@ -632,11 +608,11 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
         if (ds == null) {
             // Пула нет (ещё не создан или закрыт), но освобождается он или нет — показываем правду.
-            HikariSettings s = applied.get();
+            PoolSize s = applied.get();
             int held = drainingTotal;
             int ceiling = s == null ? 0 : s.maximumPoolSize();
             return new Runtime(
-                    s == null ? "нет пула" : s.poolName(),
+                    s == null ? "нет пула" : db.getPoolName(),
                     generation.get(),
                     true,
                     held, drainingActive, 0, 0,
@@ -732,7 +708,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     /**
-     * Пока пула нет (старт с размером 0), вспомогательные методы DataSource-контракта не должны
+     * Пока пула нет (конфигурация ещё не приходила), вспомогательные методы DataSource-контракта не
      * падать — Spring и актуатор ходят в них ещё до первого конфига из etcd.
      */
     @Override
@@ -792,7 +768,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
 
     public enum Outcome { CREATED, RESIZED, RECREATED, CLOSED, UNCHANGED, REJECTED }
 
-    public record ApplyResult(Outcome outcome, List<String> changes, HikariSettings settings) {}
+    public record ApplyResult(Outcome outcome, List<String> changes, PoolSize size) {}
 
     /** Срез состояния пула в конкретный момент. */
     public record Runtime(

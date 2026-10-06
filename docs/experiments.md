@@ -120,16 +120,20 @@ t=12s — переходный момент: лимит 30 уже применё
 ### `maximumPoolSize = 0` — отказ целиком
 
 ```
-hikari - [etcd@9 [maximumPoolSize=put]] конфиг отклонён (maximumPoolSize=0 вне диапазона [1..200]),
-         остаёмся на предыдущих значениях: HikariSettings[... maximumPoolSize=30, minimumIdle=30 ...]
+ERROR [grpc-default-executor-0] c.a.d.e.s.etcd.EtcdPoolConfigSource - [etcd@4248 [maximumPoolSize=put]] rejected: maximumPoolSize=0 из etcd недопустим (пулом управляет провижёр): пул остаётся на последних рабочих значениях
 ```
 
-```json
-{"pool": {"maximumPoolSize": 30, "total": 30}, "etcd": {"lastOutcome": "REJECTED"}}
+```
+pool_config_state{node="service-b-group-1-1",state="rejected"} 1
+pool_config_maximum_pool_size{node="service-b-group-1-1"} 25
 ```
 
-Пул остался на 30, в `etcd.lastError` — `rejected: maximumPoolSize=0 вне диапазона [1..200]`.
-Сервис жив, ни один запрос не упал.
+Пул остался на 25 (`pool_config_maximum_pool_size`), сервис жив: пул не трогался вовсе, окна
+без соединений не было. Состояние `rejected` держится до ближайшего пересчёта провижёра:
+отклонённый конфиг не применяется, инстанс ничего не публикует и пересчёт не порождает.
+Проверено на стенде: `rejected` держался несколько минут и вернулся в `applied` сразу за
+пересчётом, порождённым правкой бюджета (лог провижёра: `ключ бюджета ... изменён: пересчитываю
+распределение`). Пул всё это время оставался на последних рабочих значениях.
 
 ### `maximumPoolSize = banana` — игнорируется только этот ключ
 
@@ -137,46 +141,66 @@ hikari - [etcd@9 [maximumPoolSize=put]] конфиг отклонён (maximumPo
 (размер до этого был 25):
 
 ```
-etcd.EtcdPoolConfigSource - [etcd@4073 [maximumPoolSize=put]] ключ maximumPoolSize проигнорирован: 'banana' — ожидалось целое число, взято значение по умолчанию
-hikari - [etcd@4073 [maximumPoolSize=put]] пул 'service-a-group-1-1' закрыт: размер 25 -> 0, активные соединения дренированы
-hikari - [etcd@4075 [maximumPoolSize=put]] нормализация конфига: minimumIdle=30 > maximumPoolSize=25 -> понижен до 25
-hikari - [etcd@4075 [maximumPoolSize=put]] HikariCP 'service-a-group-1-1' создан заново после снятия конфигурации: max=25 minIdle=25
-hikari - [etcd@4077 [minimumIdle=put]] пул 'service-a-group-1-1' обновлён на лету: minimumIdle: 25 -> 5 | now: max=25 minIdle=5 total=25
+etcd.EtcdPoolConfigSource - [etcd@4269 [maximumPoolSize=put]] ключ maximumPoolSize проигнорирован: 'banana' — ожидалось целое число, значение не применено
+hikari - старый пул 'service-a-group-1-1' закрывается: ждём 1 активных соединений (до PT3S)
+hikari - [etcd@4269 [maximumPoolSize=put]] пул 'service-a-group-1-1' закрыт: размер 25 -> 0, активные соединения дренированы
+hikari - [etcd@4271 [maximumPoolSize=put]] нормализация конфига: idleTimeout не применим: minimumIdle == maximumPoolSize
+hikari - [etcd@4271 [maximumPoolSize=put]] HikariCP 'service-a-group-1-1' создан заново после снятия конфигурации: max=25 minIdle=25
+hikari - [etcd@4273 [minimumIdle=put]] пул 'service-a-group-1-1' обновлён на лету: minimumIdle: 25 -> 5 | now: max=25 minIdle=5 total=25
 ```
 
-```json
-{"pool_maximum_pool_size": 25, "pool_minimum_idle": 5, "pool_etcd_problems": 1, "pool_recreate_total": 1}
+```
+pool_maximum_pool_size 25, pool_minimum_idle 5, pool_etcd_problems 1,
+pool_recreate_total 1, pool_generation 2, pool_traffic_gate_open 1
 ```
 
 Соседний ключ применился целиком (`minimumIdle` 25 → 5), битый ключ не блокировал его. Исход
 применения — не `REJECTED`, конфиг в целом рабочий.
 
-**Что стоит знать про мусорный максимум.** Нечитаемое значение отбрасывается целиком, и тогда
-максимум берётся из локальной конфигурации, а она жёстко 0 («пула нет до первого конфига»).
-На стенде это значит `пул закрыт: размер 25 -> 0` и окно в 503 на 25 мс (в замере `etcd@4073` →
-`etcd@4075`): вслед за сервисным событием провижёр приводит `maximumPoolSize` к доле (управляемый
-ключ) и пул поднимается заново — растут `pool_generation` и `pool_recreate_total`. Гейт трафика
-при этом не закрывается: ключ в etcd есть, он просто нечитаем, а снятие конфигурации происходит
-по `DELETE` ключа.
+**Что стоит знать про мусорный максимум.** Нечитаемое значение отбрасывается, и в этом же
+применении максимум становится нулём: локального размера больше нет вовсе, 0 — это и есть
+«пула нет». На стенде это `пул закрыт: размер 25 -> 0` (`etcd@4269`) и ~25 мс без пула — уже к
+`etcd@4271` провижёр приводит `maximumPoolSize` к доле (управляемый ключ) и
+пул поднимается заново — растут `pool_generation` и `pool_recreate_total`. Гейт трафика при этом
+не закрывается: ключ в etcd есть, из него просто не собрался пул, а снятие конфигурации
+происходит по `DELETE` ключа. Поэтому запрос, попавший в это окно, получает не 503, а ошибку
+исполнения `IllegalStateException: пул закрыт` — гейт-то открыт.
 
 **Особенность, о которой стоит знать:** `etcd.problems` не очищается, когда значение чинят.
-Проверено: после `put maximumPoolSize=12` (нормальное число) гейдж `pool_etcd_problems` продолжал
-показывать `1`. Смотрите на `pool_maximum_pool_size`, чтобы понять текущее состояние, а
-`pool_etcd_problems` — как журнал: «что-то когда-то было плохо». Обнуляется только рестартом.
+Проверено: после `maximumPoolSize=banana` и последующего восстановления 25 гейдж
+`pool_etcd_problems` продолжал показывать `1`. Смотрите на `pool_maximum_pool_size`, чтобы
+понять текущее состояние, а `pool_etcd_problems` — как журнал: «что-то когда-то было плохо».
+Обнуляется только рестартом.
 
 ### Опечатка `maxPoolSize = 8`
 
 ```
-WARN ... в etcd есть неизвестный ключ 'maxPoolSize' (префикс '/config/pool-service/hikari/') — он игнорируется
+WARN ... в etcd есть неизвестный ключ 'maxPoolSize' (путь '/config/services/service-a/groups/group-1/instances/service-a-group-1-2/hikari/') — он игнорируется
 ```
 
-`maximumPoolSize` остался 10, ключ `maxPoolSize` виден в `etcd.keys` рядом с настоящим —
-удобно заметить при разборе. Предупреждение пишется один раз на ключ, не на каждый put.
+`maximumPoolSize` остался прежним, ключ `maxPoolSize` виден в снимке рядом с настоящим
+(`etcdctl get --prefix`) — удобно заметить при разборе. Предупреждение пишется один раз на ключ,
+не на каждый put.
 
 ### Удаление ключа
 
-`etcdctl del maximumPoolSize` → пул вернулся к 10 (локальный дефолт), `revision` выросла до 13.
-`DELETE` в etcd равнозначен «вернуться к дефолту», а не «запретить ключ».
+`etcdctl del maximumPoolSize` — это снятие конфигурации, а не «вернуться к локальному дефолту»:
+локального размера больше нет вовсе. На `service-a-group-1-2`, у которого в пути был только этот
+ключ:
+
+```
+hikari - старый пул 'service-a-group-1-2' закрывается: ждём 1 активных соединений (до PT3S)
+hikari - [etcd@4277 [maximumPoolSize=delete]] пул 'service-a-group-1-2' закрыт: размер 25 -> 0, активные соединения дренированы
+EtcdPoolConfigSource - [etcd@4277 [maximumPoolSize=delete]] в пути /config/services/service-a/groups/group-1/instances/service-a-group-1-2/hikari/ не осталось распознанных ключей — закрываю трафик
+INFO [etcd-drain-publication] EtcdPoolConfigSource - опубликовано неосвобождённое сжатие: 0 (потолок 0, удерживается 0)
+hikari - [etcd@4279 [maximumPoolSize=put]] HikariCP 'service-a-group-1-2' создан заново после снятия конфигурации: max=25 minIdle=25
+EtcdPoolConfigSource - [etcd@4279 [maximumPoolSize=put]] конфигурация по пути /config/services/service-a/groups/group-1/instances/service-a-group-1-2/hikari/ получена, открываем трафик
+```
+
+Удаление ключа закрыло вместе с пулом и гейт: в это окно `/api/work` отвечает 503, а `readiness`
+— DOWN с `pool_not_ready_reason{reason="no_config_keys"}`. Инстанс опубликовал нулевой потолок,
+провижёр вернул долю, трафик открылся снова — закрытие и восстановление заняли ~76 мс
+(`29.576` → `29.652`), без нагрузки.
 
 ## Пересоздание пула: выход из нулевого размера
 

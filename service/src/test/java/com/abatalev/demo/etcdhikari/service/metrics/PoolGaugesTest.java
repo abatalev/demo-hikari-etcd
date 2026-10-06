@@ -28,17 +28,21 @@ class PoolGaugesTest {
 
     private static final String SECRET = "parol-ne-v-metrikah";
 
-    private ManagedPool poolWithoutConfig(PoolCounters counters) {
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        db.setMaximumPoolSize(0);
-        return new ManagedPool(db.toSettings(), -1L, false, false, Duration.ZERO, counters);
+    private ManagedPool poolWithoutConfig(DbProperties db, PoolCounters counters) {
+        return new ManagedPool(db, false, Duration.ZERO, counters, MechanismSpans.NOOP);
     }
 
-    private EtcdPoolConfigSource disabledSource(ManagedPool pool, DbProperties db, PoolCounters counters) {
+    /** Пароль задаём везде: он не должен просочиться ни в один ряд ни в одном состоянии пула. */
+    private DbProperties dbWithSecret() {
+        DbProperties db = new DbProperties();
+        db.setPassword(SECRET);
+        return db;
+    }
+
+    private EtcdPoolConfigSource disabledSource(ManagedPool pool, PoolCounters counters) {
         EtcdProperties etcd = new EtcdProperties();
         etcd.setEnabled(false);
-        return new EtcdPoolConfigSource(pool, db, etcd, event -> {}, counters, MechanismSpans.NOOP);
+        return new EtcdPoolConfigSource(pool, etcd, event -> {}, counters, MechanismSpans.NOOP);
     }
 
     @Test
@@ -46,10 +50,8 @@ class PoolGaugesTest {
     void gaugesAreZeroWithoutPool() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PoolCounters counters = new PoolCounters(registry);
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        ManagedPool pool = poolWithoutConfig(counters);
-        new PoolGauges(registry, pool, disabledSource(pool, db, counters));
+        ManagedPool pool = poolWithoutConfig(dbWithSecret(), counters);
+        new PoolGauges(registry, pool, disabledSource(pool, counters));
 
         assertThat(registry.get("pool.connections.open").gauge().value()).isZero();
         assertThat(registry.get("pool.connections.busy").gauge().value()).isZero();
@@ -65,10 +67,8 @@ class PoolGaugesTest {
     void readingAllGaugesDoesNotThrow() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PoolCounters counters = new PoolCounters(registry);
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        ManagedPool pool = poolWithoutConfig(counters);
-        new PoolGauges(registry, pool, disabledSource(pool, db, counters));
+        ManagedPool pool = poolWithoutConfig(dbWithSecret(), counters);
+        new PoolGauges(registry, pool, disabledSource(pool, counters));
 
         assertThatCode(() -> registry.getMeters().stream()
                 .filter(m -> m.getId().getName().startsWith("pool."))
@@ -82,10 +82,8 @@ class PoolGaugesTest {
     void closedSetsOfLabelValues() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PoolCounters counters = new PoolCounters(registry);
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        ManagedPool pool = poolWithoutConfig(counters);
-        new PoolGauges(registry, pool, disabledSource(pool, db, counters));
+        ManagedPool pool = poolWithoutConfig(dbWithSecret(), counters);
+        new PoolGauges(registry, pool, disabledSource(pool, counters));
 
         // Источник выключен: конфигурация не «отсутствует», а просто не из etcd.
         assertThat(registry.get("pool.config.state").tag("state", "none").gauge().value()).isEqualTo(1d);
@@ -104,10 +102,8 @@ class PoolGaugesTest {
     void passwordNeverLeaksIntoMetrics() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         PoolCounters counters = new PoolCounters(registry);
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        ManagedPool pool = poolWithoutConfig(counters);
-        new PoolGauges(registry, pool, disabledSource(pool, db, counters));
+        ManagedPool pool = poolWithoutConfig(dbWithSecret(), counters);
+        new PoolGauges(registry, pool, disabledSource(pool, counters));
 
         for (Meter meter : registry.getMeters()) {
             assertThat(meter.getId().getName()).doesNotContain(SECRET);
@@ -123,10 +119,8 @@ class PoolGaugesTest {
         // настоящий текстовый формат prometheus и через принудительный сбор мусора.
         PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         PoolCounters counters = new PoolCounters(registry);
-        DbProperties db = new DbProperties();
-        db.setPassword(SECRET);
-        ManagedPool pool = poolWithoutConfig(counters);
-        new PoolGauges(registry, pool, disabledSource(pool, db, counters));
+        ManagedPool pool = poolWithoutConfig(dbWithSecret(), counters);
+        new PoolGauges(registry, pool, disabledSource(pool, counters));
 
         String scrape = null;
         for (int attempt = 0; attempt < 5; attempt++) {

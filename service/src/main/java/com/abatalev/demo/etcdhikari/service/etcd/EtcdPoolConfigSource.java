@@ -32,11 +32,9 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-import com.abatalev.demo.etcdhikari.service.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
 import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
-import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
 import com.abatalev.demo.etcdhikari.service.pool.InvalidSettingsException;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 
@@ -78,7 +76,6 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private static final Set<String> MASKED_KEYS = Set.of("password");
 
     private final ManagedPool pool;
-    private final HikariSettings defaults;
     private final EtcdProperties properties;
     private final ApplicationEventPublisher eventPublisher;
     private final PoolCounters counters;
@@ -125,10 +122,9 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private volatile Thread registrationThread;
     private volatile Thread publicationThread;
 
-    public EtcdPoolConfigSource(ManagedPool pool, DbProperties dbProperties, EtcdProperties properties,
+    public EtcdPoolConfigSource(ManagedPool pool, EtcdProperties properties,
             ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismSpans spans) {
         this.pool = pool;
-        this.defaults = dbProperties.toSettings();
         this.properties = properties;
         this.eventPublisher = eventPublisher;
         this.counters = counters;
@@ -625,7 +621,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             // Инвариант: 0 из etcd недопустим. Пулом управляет провижер — размер 0 он присылает
             // «не присыланием ключей вовсе», а записанный вручную 0 (или занесённый оверайдом)
             // отклоняем целиком: пул остаётся на последних рабочих значениях, гейт открыт.
-            Integer etcdMax = parsed.settings().maximumPoolSize();
+            Integer etcdMax = parsed.size().maximumPoolSize();
             if (etcdMax != null && etcdMax == 0) {
                 ManagedPool.ApplyResult rejected = new ManagedPool.ApplyResult(
                         ManagedPool.Outcome.REJECTED,
@@ -638,8 +634,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
                 log.error("[{}] {}: пул остаётся на последних рабочих значениях",
                         reason, rejected.changes().get(0));
             } else {
-                HikariSettings desired = parsed.settings().resolve(defaults);
-                ManagedPool.ApplyResult result = pool.apply(desired, reason);
+                ManagedPool.ApplyResult result = pool.apply(parsed.size(), reason);
                 lastOutcome.set(result.outcome());
                 applyCount.incrementAndGet();
                 if (result.outcome() == ManagedPool.Outcome.REJECTED) {

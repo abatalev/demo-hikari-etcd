@@ -5,10 +5,10 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
+import com.abatalev.demo.etcdhikari.service.pool.PoolSize;
 
 /**
- * Разбор ключей etcd в настройки пула. Отдельный класс, чтобы это можно было
+ * Разбор ключей etcd в размер пула. Отдельный класс, чтобы это можно было
  * покрыть тестами без поднятия etcd.
  *
  * <p>Хранилище конфигурации владеет только размером пула. Схема ключей (путь собирается из
@@ -32,30 +32,20 @@ public final class EtcdKeys {
     private EtcdKeys() {}
 
     /**
-     * Разбирает ключи в настройки. Нечитаемые значения (мусор вместо числа) не роняют весь
-     * конфиг: они попадают в {@link Parsed#problems()}, а в настройках остаются null, то есть
-     * возьмутся локальные дефолты. Так одно битое значение не блокирует правку соседних ключей.
+     * Разбирает ключи в размер пула. Нечитаемые значения (мусор вместо числа) не роняют весь
+     * конфиг: они попадают в {@link Parsed#problems()}, а в размере остаётся null, то есть
+     * максимум станет нулём — пул закроется, пока провижёр не вернёт долю. Так одно битое значение
+     * не блокирует правку соседних ключей.
      */
     public static Parsed parse(Map<String, String> fullKeys, String prefix) {
         Map<String, String> problems = new HashMap<>();
-        // null в целевых и таймаутных полях: из etcd они не приходят, их подставит resolve(defaults)
-        // из локальной конфигурации процесса.
-        return new Parsed(new HikariSettings(
-                null,
-                null,
-                null,
-                null,
+        return new Parsed(new PoolSize(
                 intValue(fullKeys, prefix, MAX_POOL_SIZE, problems),
-                intValue(fullKeys, prefix, MIN_IDLE, problems),
-                null,
-                null,
-                null,
-                null,
-                null), problems);
+                intValue(fullKeys, prefix, MIN_IDLE, problems)), problems);
     }
 
-    /** Настройки + список ключей, которые не удалось прочитать (ключ -> причина). */
-    public static record Parsed(HikariSettings settings, Map<String, String> problems) {}
+    /** Размер пула + список ключей, которые не удалось прочитать (ключ -> причина). */
+    public static record Parsed(PoolSize size, Map<String, String> problems) {}
 
     /** Неизвестные ключи (опечатки и снятые настройки) — возвращаем, чтобы залогировать один раз. */
     public static Set<String> unknownKeys(Map<String, String> fullKeys, String prefix) {
@@ -85,7 +75,7 @@ public final class EtcdKeys {
         try {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
-            problems.put(shortKey, "'" + raw + "' — ожидалось целое число, взято значение по умолчанию");
+            problems.put(shortKey, "'" + raw + "' — ожидалось целое число, значение не применено");
             return null;
         }
     }

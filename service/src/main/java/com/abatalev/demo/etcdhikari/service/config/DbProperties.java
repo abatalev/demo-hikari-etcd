@@ -1,29 +1,39 @@
 package com.abatalev.demo.etcdhikari.service.config;
 
-import com.abatalev.demo.etcdhikari.service.pool.HikariSettings;
+import com.abatalev.demo.etcdhikari.service.pool.InvalidSettingsException;
+import com.abatalev.demo.etcdhikari.service.pool.PoolSize;
+import com.zaxxer.hikari.HikariConfig;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Локальные дефолты (источник "фолбэк", когда etcd недоступен или ключ не задан). Размер пула
- * задаётся исключительно etcd: {@code maximumPoolSize} по умолчанию 0, поэтому без конфигурации
- * пул не создаётся вообще.
+ * Локальная конфигурация пула: цель соединения и таймауты. Меняется только перезапуском, поэтому
+ * в etcd её нет — из хранилища приходит исключительно размер ({@link PoolSize}).
+ *
+ * <p>Здесь же единственное место, где собирается {@link HikariConfig}: держать рядом с ним вторую
+ * модель настроек — значит гарантированно получить расхождение между проверенным и применённым.
  */
 @ConfigurationProperties(prefix = "pool.db")
 public class DbProperties {
+
+    private static final long CONNECTION_TIMEOUT_MIN_MS = 250;
+    private static final long CONNECTION_TIMEOUT_MAX_MS = 600_000;
+    private static final long IDLE_TIMEOUT_MIN_MS = 10_000;
+    private static final long IDLE_TIMEOUT_MAX_MS = 3_600_000;
+    private static final long MAX_LIFETIME_MIN_MS = 30_000;
+    private static final long MAX_LIFETIME_MAX_MS = 3_600_000;
+    private static final long VALIDATION_TIMEOUT_MIN_MS = 250;
+    private static final long VALIDATION_TIMEOUT_MAX_MS = 60_000;
+    private static final long LEAK_DETECTION_MIN_MS = 2_000;
+    private static final long LEAK_DETECTION_MAX_MS = 600_000;
 
     private String jdbcUrl = "jdbc:postgresql://localhost:5432/demo";
     private String username = "app";
     private String password = "app";
     private String poolName = "pool-service";
 
-    /**
-     * Размер пула приходит только из etcd (провижер делит сервисный бюджет); локальный дефолт
-     * жёстко 0 — пула нет, пока не пришла конфигурация. 0 из etcd источник отклоняет (REJECTED).
-     */
-    private Integer maximumPoolSize = 0;
-    /** null = "держаться за maximumPoolSize" ( HikariCP так и делает по умолчанию). */
-    private Integer minimumIdle = null;
     private Long connectionTimeoutMs = 30_000L;
     private Long idleTimeoutMs = 600_000L;
     private Long maxLifetimeMs = 1_800_000L;
@@ -44,26 +54,114 @@ public class DbProperties {
     private boolean eagerFillOnResize = true;
 
     /**
-     * Сколько ждать, пока доработают активные соединения перед закрытием старого пула
-     * (актуально только для смены jdbcUrl/кредов). 0 = закрывать сразу, не ждя.
+     * Сколько ждать, пока доработают активные соединения перед закрытием старого пула. 0 = закрывать
+     * сразу, не ждя.
      */
     private Duration drainOnRecreateTimeout = Duration.ofSeconds(3);
 
     private boolean registerMbeans = true;
 
-    public HikariSettings toSettings() {
-        return new HikariSettings(
-                jdbcUrl,
-                username,
-                password,
-                poolName,
-                maximumPoolSize,
-                minimumIdle,
-                connectionTimeoutMs,
-                idleTimeoutMs,
-                maxLifetimeMs,
-                validationTimeoutMs,
-                leakDetectionThresholdMs);
+    /**
+     * Проверка локальной конфигурации. Жёсткие нарушения -> исключение (контекст падает на старте:
+     * молчаливое применение неверного таймаута хуже, чем отказ подняться). Мягкие -> предупреждения
+     * для журнала.
+     *
+     * <p>Проверка живёт здесь, а не в HikariCP, потому что диапазоны и обязательность — наш контракт
+     * (см. спеку config-validation): свой HikariCP проверяет в момент создания пула и по-английски,
+     * а часть сочетаний не предупреждает вовсе.
+     */
+    public List<String> validate() {
+        String url = require(jdbcUrl, "jdbcUrl");
+        if (!url.startsWith("jdbc:")) {
+            throw new InvalidSettingsException("jdbcUrl должен начинаться с 'jdbc:', получено: " + url);
+        }
+        require(username, "username");
+        if (password == null) {
+            throw new InvalidSettingsException("password обязателен (пустая строка = вход без пароля)");
+        }
+        require(poolName, "poolName");
+
+        long connectionTimeout = longInRange(connectionTimeoutMs, "connectionTimeoutMs",
+                CONNECTION_TIMEOUT_MIN_MS, CONNECTION_TIMEOUT_MAX_MS);
+        longZeroOrRange(idleTimeoutMs, "idleTimeoutMs", IDLE_TIMEOUT_MIN_MS, IDLE_TIMEOUT_MAX_MS);
+        longZeroOrRange(maxLifetimeMs, "maxLifetimeMs", MAX_LIFETIME_MIN_MS, MAX_LIFETIME_MAX_MS);
+        longInRange(validationTimeoutMs, "validationTimeoutMs", VALIDATION_TIMEOUT_MIN_MS, VALIDATION_TIMEOUT_MAX_MS);
+        long leakDetection = longZeroOrRange(leakDetectionThresholdMs, "leakDetectionThresholdMs",
+                LEAK_DETECTION_MIN_MS, LEAK_DETECTION_MAX_MS);
+
+        List<String> warnings = new ArrayList<>();
+        if (leakDetection > 0 && leakDetection >= connectionTimeout) {
+            warnings.add("leakDetectionThresholdMs >= connectionTimeoutMs, возможны ложные срабатывания");
+        }
+        return warnings;
+    }
+
+    /**
+     * Предупреждения, которые зависят от размера пула: таймаут простоя не применим, когда минимум
+     * равен максимуму. Локальное значение одно, поэтому проверять эту связь имеет смысл там, где
+     * пришёл размер, — на каждом применении конфигурации.
+     */
+    public List<String> warningsFor(PoolSize size) {
+        if (idleTimeoutMs > 0 && size.maximumPoolSize() > 0 && size.minimumIdle() == size.maximumPoolSize()) {
+            return List.of("idleTimeout не применим: minimumIdle == maximumPoolSize");
+        }
+        return List.of();
+    }
+
+    /**
+     * Единственное место, где собирается конфигурация HikariCP: локальные значения плюс размер из
+     * etcd. Вызывается на каждое создание пула, поэтому собирать заново — правильно.
+     *
+     * @param size нормализованный размер (см. {@link PoolSize#normalize()})
+     */
+    public HikariConfig toHikariConfig(PoolSize size) {
+        HikariConfig config = new HikariConfig();
+        config.setPoolName(poolName);
+        config.setJdbcUrl(jdbcUrl);
+        config.setUsername(username);
+        config.setPassword(password);
+        config.setMaximumPoolSize(size.maximumPoolSize());
+        config.setMinimumIdle(size.minimumIdle());
+        config.setConnectionTimeout(connectionTimeoutMs);
+        config.setIdleTimeout(idleTimeoutMs);
+        config.setMaxLifetime(maxLifetimeMs);
+        config.setValidationTimeout(validationTimeoutMs);
+        config.setLeakDetectionThreshold(leakDetectionThresholdMs);
+        config.setInitializationFailTimeout(initializationFailTimeoutMs);
+        config.setRegisterMbeans(registerMbeans);
+        // чтобы считать свои сессии в pg_stat_activity
+        config.addDataSourceProperty("ApplicationName", poolName);
+        return config;
+    }
+
+    private static String require(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new InvalidSettingsException(field + " обязателен");
+        }
+        return value;
+    }
+
+    private static long longInRange(Long value, String field, long min, long max) {
+        if (value == null) {
+            throw new InvalidSettingsException(field + " обязателен");
+        }
+        if (value < min || value > max) {
+            throw new InvalidSettingsException(field + "=" + value + " вне диапазона [" + min + ".." + max + "]");
+        }
+        return value;
+    }
+
+    private static long longZeroOrRange(Long value, String field, long min, long max) {
+        if (value == null) {
+            throw new InvalidSettingsException(field + " обязателен");
+        }
+        if (value == 0L) {
+            return 0L;
+        }
+        if (value < min || value > max) {
+            throw new InvalidSettingsException(field + "=" + value + " вне диапазона [0 или " + min + ".." + max + "]");
+        }
+        return value;
     }
 
     public String getJdbcUrl() {
@@ -96,22 +194,6 @@ public class DbProperties {
 
     public void setPoolName(String poolName) {
         this.poolName = poolName;
-    }
-
-    public Integer getMaximumPoolSize() {
-        return maximumPoolSize;
-    }
-
-    public void setMaximumPoolSize(Integer maximumPoolSize) {
-        this.maximumPoolSize = maximumPoolSize;
-    }
-
-    public Integer getMinimumIdle() {
-        return minimumIdle;
-    }
-
-    public void setMinimumIdle(Integer minimumIdle) {
-        this.minimumIdle = minimumIdle;
     }
 
     public Long getConnectionTimeoutMs() {

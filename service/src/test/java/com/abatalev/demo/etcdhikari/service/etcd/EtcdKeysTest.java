@@ -2,6 +2,7 @@ package com.abatalev.demo.etcdhikari.service.etcd;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.abatalev.demo.etcdhikari.service.pool.PoolSize;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -12,18 +13,15 @@ class EtcdKeysTest {
 
     @Test
     @DisplayName("из etcd читаются только размер и минимум")
-    void readsOnlySizeKeysIntoSettings() {
+    void readsOnlySizeKeysIntoSize() {
         Map<String, String> keys = Map.of(
                 PREFIX + "maximumPoolSize", "24",
                 PREFIX + "minimumIdle", "6");
 
         EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, PREFIX);
 
-        assertThat(parsed.settings().maximumPoolSize()).isEqualTo(24);
-        assertThat(parsed.settings().minimumIdle()).isEqualTo(6);
-        // цель и таймауты из etcd не приходят: null, дальше разрулит resolve(defaults)
-        assertThat(parsed.settings().jdbcUrl()).isNull();
-        assertThat(parsed.settings().connectionTimeoutMs()).isNull();
+        assertThat(parsed.size().maximumPoolSize()).isEqualTo(24);
+        assertThat(parsed.size().minimumIdle()).isEqualTo(6);
         assertThat(parsed.problems()).isEmpty();
     }
 
@@ -35,7 +33,7 @@ class EtcdKeysTest {
 
     @Test
     void missingKeysGiveNulls() {
-        assertThat(EtcdKeys.parse(Map.of(), PREFIX).settings().maximumPoolSize()).isNull();
+        assertThat(EtcdKeys.parse(Map.of(), PREFIX).size().maximumPoolSize()).isNull();
     }
 
     @Test
@@ -46,9 +44,9 @@ class EtcdKeysTest {
 
         EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, PREFIX);
 
-        // битое значение -> null (возьмётся дефолт), остальные ключи читаются как обычно
-        assertThat(parsed.settings().maximumPoolSize()).isNull();
-        assertThat(parsed.settings().minimumIdle()).isEqualTo(4);
+        // битое значение -> null (пул закроется), остальные ключи читаются как обычно
+        assertThat(parsed.size().maximumPoolSize()).isNull();
+        assertThat(parsed.size().minimumIdle()).isEqualTo(4);
         assertThat(parsed.problems()).containsOnlyKeys(EtcdKeys.MAX_POOL_SIZE);
         assertThat(parsed.problems().get(EtcdKeys.MAX_POOL_SIZE)).contains("много");
     }
@@ -57,7 +55,7 @@ class EtcdKeysTest {
     void valuesAreTrimmed() {
         Map<String, String> keys = Map.of(PREFIX + "maximumPoolSize", " 8\n");
 
-        assertThat(EtcdKeys.parse(keys, PREFIX).settings().maximumPoolSize()).isEqualTo(8);
+        assertThat(EtcdKeys.parse(keys, PREFIX).size().maximumPoolSize()).isEqualTo(8);
     }
 
     @Test
@@ -84,12 +82,7 @@ class EtcdKeysTest {
         EtcdKeys.Parsed parsed = EtcdKeys.parse(keys, PREFIX);
 
         // ключи вне перечня не применяются: пул остаётся на локально заданной цели
-        assertThat(parsed.settings().maximumPoolSize()).isEqualTo(24);
-        assertThat(parsed.settings().jdbcUrl()).isNull();
-        assertThat(parsed.settings().username()).isNull();
-        assertThat(parsed.settings().password()).isNull();
-        assertThat(parsed.settings().poolName()).isNull();
-        assertThat(parsed.settings().connectionTimeoutMs()).isNull();
+        assertThat(parsed.size()).isEqualTo(new PoolSize(24, null));
         assertThat(EtcdKeys.unknownKeys(keys, PREFIX))
                 .containsExactlyInAnyOrder("jdbcUrl", "username", "password", "poolName",
                         "connectionTimeoutMs");

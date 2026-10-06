@@ -468,7 +468,8 @@ openspec validate <name>                 # проверить артефакты
 
 ```
 service/       Spring Boot 3.5 + HikariCP + jetcd        (mvn test)
-  pool/        ManagedPool, HikariSettings (валидация)   — сердце прототипа
+  pool/        ManagedPool, PoolSize (размер из etcd)   — сердце прототипа
+  config/      DbProperties (цель соединения, таймауты) — локально, без etcd
   etcd/        EtcdPoolConfigSource (watch+гейт), EtcdKeys, EtcdKeyPath
   controller/  PoolController, TrafficGateFilter (503)  — только HTTP
   service/     WorkService (сценарий замера)            — без HTTP и SQL
@@ -494,7 +495,8 @@ openspec/      спецификации и изменения (config.yaml, spec
 .opencode/     слэш-команды и скилы OpenSpec для OpenCode
 ```
 
-Юнит-тесты без etcd и без БД: `HikariSettingsTest` (валидация, дефолты, diff), `EtcdKeysTest`
+Юнит-тесты без etcd и без БД: `PoolSizeTest` (нормализация размера, diff), `DbPropertiesTest`
+(валидация локальных значений, сборка конфига HikariCP), `EtcdKeysTest`
 (разбор ключей), `EtcdKeyPathTest` (путь и валидация сегментов) — у сервиса, и
 `InstanceKeyTest`/`ElectionTimingsTest`/`GroupFleetKeyTest` (грамматика узла/конфигурации, набор
 живых сервисов, интервал keepalive, маркеры флота) — у провизора. Метрики покрыты

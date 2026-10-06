@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
  */
 class PoolSizeDistributionTest {
 
-    /** Верхняя граница доли — по умолчанию зеркалит HikariSettings.POOL_SIZE_MAX. */
+    /** Верхняя граница доли — по умолчанию зеркалит PoolSize.POOL_SIZE_MAX у сервиса. */
     private static final int MAX_SHARE = 200;
 
     private static List<String> nodes(int count) {

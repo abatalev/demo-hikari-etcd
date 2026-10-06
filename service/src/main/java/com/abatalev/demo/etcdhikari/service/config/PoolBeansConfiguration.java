@@ -15,8 +15,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class PoolBeansConfiguration {
 
     /**
-     * Пул создаётся только из конфигурации etcd: локальный дефолт максимума 0, поэтому при старте
-     * пула нет вовсе. Первый принятый конфиг от провижера создаёт пул; нулевой целевой размер
+     * Пул создаётся только из конфигурации etcd: локального размера нет вовсе, поэтому при старте
+     * пула нет. Первый принятый конфиг от провижера создаёт пул; нулевой целевой размер
      * (холодная группа, снятие конфигурации) закрывает его с дренажом.
      *
      * <p>{@code @Primary} обязателен: бин {@code dataSource} ниже отдаёт тот же объект, и как
@@ -29,9 +29,7 @@ public class PoolBeansConfiguration {
     @Primary
     ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans) {
         return new ManagedPool(
-                properties.toSettings(),
-                properties.getInitializationFailTimeoutMs(),
-                properties.isRegisterMbeans(),
+                properties,
                 properties.isEagerFillOnResize(),
                 properties.getDrainOnRecreateTimeout(),
                 counters,
