@@ -3,7 +3,7 @@
 
 Читает со stdin вывод `etcdctl get --prefix {root}/provisioner/leader/ -w json`.
 Лидер — ключ с наименьшим create_revision в префиксе сервиса (старейший из живых
-кампаний); значение ключа — имя реплики (PROV_NAME).
+кампаний); значение ключа — имя реплики (цепочка PROV_NAME → POD_NAME → HOSTNAME).
 """
 import base64
 import json

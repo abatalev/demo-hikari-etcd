@@ -6,201 +6,16 @@ name: hikari-etcd-stand
 # ID контейнера) — см. service/src/main/resources/application.yml. Ни перечня инстансов, ни
 # хост-портов в конфигурации нет: список развёрнутого — только docker compose ps. Механизму
 # разделение безразлично: бюджет и доли живут в etcd, адрес базы приходит локально в DB_URL.
-
-# Образ с etcdctl для ручных правок конфигурации из Makefile (make config / set-size и т.п.).
-x-etcdctl: &etcdctl
-  image: hikari-etcd/etcdctl:local
-  build: ./etcd
-  environment:
-    ETCDCTL_ENDPOINTS: http://etcd:2379
-    ETCDCTL_API: "3"
-
-# Общая часть инстанса сервиса, одинаковая для обоих сервисов. Реплики группы отличаются только
-# группой (ETCD_GROUP) и тем, что им даёт окружение: сервис — SERVICE_NAME, инстанс и POOL_NAME —
-# цепочки дефолтов в application.yml (HOSTNAME в контейнере = короткий ID, и он же имя узла
-# регистрации и application_name пула). До 8080 реплики не публикуются вовсе: наружу флот отдаёт
-# балансировщик, и у инстанса нет ни имени, ни порта, которые можно было бы зафиксировать.
-x-service: &service-base
-  image: hikari-etcd/service:local
-  build: ./service
-  mem_limit: 512m
-  environment: &service-env
-    DB_USER: ${POSTGRES_USER:-app}
-    DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
-    # Размер пула приходит только из etcd: локального размера нет вовсе, POOL_MAX_SIZE тоже нет.
-    # true = после расширения пула сразу открыть нужное число коннектов (демо).
-    # false = как в проде: коннекты добираются по мере надобности.
-    POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
-    # Таймауты приходят только отсюда, из etcd не читаются: правка требует перезапуска инстанса.
-    # Короткое значение — способ воспроизвести 503 перегруза (насыщенный пул не берёт коннект).
-    POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
-    # сколько ждать активные соединения перед закрытием пула (нулевой размер, остановка)
-    POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
-    ETCD_ENDPOINTS: http://etcd:2379
-    ETCD_ROOT: ${ETCD_ROOT:-/config}
-    # Доля запросов, попадающих в трассу: 1.0 — всё (стенд и разбор перехода), меньше — меньше
-    # помехи под долгой нагрузкой. События механизма отбираются всегда, независимо от доли.
-    OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
-    # Адреса точки приёма сигналов. По умолчанию дверь стенда; переопределение нужно, чтобы
-    # проверить, что отправка не влияет на пул и трафик (сценарий «точка приёма недоступна»).
-    OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
-    OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
-    OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
-  healthcheck:
-    # Готовность (гейт конфигурации), а не общий health: живость от etcd не зависит.
-    # Это docker-здоровье, по которому make up и wait-ready ждут готовности флота; балансировщик
-    # готовность опрашивает сам, своим healthcheck (см. метки x-service-a/x-service-b).
-    test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
-    interval: 5s
-    timeout: 3s
-    start_period: 90s
-    retries: 60
-
-# Часть инстанса, различающаяся по сервису: адрес базы, условие готовности по своей базе, имя
-# сервиса и метки Traefik. Разделение здесь, а не в блоках инстансов, гарантирует, что у инстанса
-# не может оказаться база чужого сервиса и метки чужой точки входа. Имена роутера и сервиса на
-# балансировщике — на сервис (fleet-service-a): реплики одной группы несут одинаковые метки, и
-# Traefik сам дедуплицирует их в один роутер; границу по сервису держат отдельные точки входа.
-x-service-a: &service-a
-  <<: *service-base
-  depends_on:
-    postgres-a:
-      condition: service_healthy
-  environment: &service-a-env
-    <<: *service-env
-    SERVICE_NAME: service-a
-    DB_URL: jdbc:postgresql://postgres-a:5432/${POSTGRES_DB:-demo}
-  labels: &service-a-labels
-    traefik.enable: "true"
-    traefik.http.routers.fleet-service-a.rule: "PathPrefix(`/`)"
-    traefik.http.routers.fleet-service-a.entrypoints: "web-a"
-    traefik.http.routers.fleet-service-a.service: "fleet-service-a"
-    traefik.http.services.fleet-service-a.loadbalancer.server.port: "8080"
-    # Исключение неготового экземпляра — не позднее одного периода опроса готовности: интервал
-    # опроса 1с накладывается на /actuator/health/readiness, который честно отдаёт 503 при
-    # закрытом гейте конфигурации. Docker-healthcheck для этого не годится (retries 60 × 5с).
-    traefik.http.services.fleet-service-a.loadbalancer.healthcheck.path: "/actuator/health/readiness"
-    traefik.http.services.fleet-service-a.loadbalancer.healthcheck.interval: "1s"
-
-x-service-b: &service-b
-  <<: *service-base
-  depends_on:
-    postgres-b:
-      condition: service_healthy
-  environment: &service-b-env
-    <<: *service-env
-    SERVICE_NAME: service-b
-    DB_URL: jdbc:postgresql://postgres-b:5432/${POSTGRES_DB:-demo}
-  labels: &service-b-labels
-    traefik.enable: "true"
-    traefik.http.routers.fleet-service-b.rule: "PathPrefix(`/`)"
-    traefik.http.routers.fleet-service-b.entrypoints: "web-b"
-    traefik.http.routers.fleet-service-b.service: "fleet-service-b"
-    traefik.http.services.fleet-service-b.loadbalancer.server.port: "8080"
-    traefik.http.services.fleet-service-b.loadbalancer.healthcheck.path: "/actuator/health/readiness"
-    traefik.http.services.fleet-service-b.loadbalancer.healthcheck.interval: "1s"
-
-# Общий блок провизинера конфигурации (две реплики). Работает один на сервис: лидер выбирается
-# узлами {root}/provisioner/leader/{service}/, набор сервисов провизор выводит сам из узлов
-# регистрации дерева {root}/services/. Ключи кладутся атомарно и только если их ещё нет (txn
-# «ключа нет → put»): ручные правки оператора не затираются ни одной из реплик.
-x-provisioner: &provisioner
-  image: hikari-etcd/config-provisioner:local
-  build: ./provisioner
-  mem_limit: 512m
-  depends_on:
-    etcd:
-      condition: service_healthy
-  environment: &provisioner-env
-    PROV_ETCD_ENDPOINTS: http://etcd:2379
-    PROV_ETCD_ROOT: ${ETCD_ROOT:-/config}
-    PROV_ACTIVE_MAX_CONNECTIONS: ${PROV_ACTIVE_MAX_CONNECTIONS:-100}
-    PROV_ACTIVE_MIN_CONNECTIONS: ${PROV_ACTIVE_MIN_CONNECTIONS:-1}
-    PROV_INACTIVE_MAX_CONNECTIONS: ${PROV_INACTIVE_MAX_CONNECTIONS:-1}
-    PROV_MAX_SHARE: ${PROV_MAX_SHARE:-200}
-    PROV_LEADER_TTL: ${PROV_LEADER_TTL:-10s}
-    # Доля запросов, попадающих в трассу: 1.0 — всё, меньше — меньше помехи.
-    OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
-    # Адреса точки приёма сигналов: по умолчанию дверь стенда, переопределение — для проверки
-    # «наблюдение недоступно, провижининг работает».
-    OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
-    OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
-    OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
-  healthcheck:
-    # Живость — только ping: провижининг переживает обрывы etcd сам.
-    test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
-    interval: 5s
-    timeout: 3s
-    start_period: 60s
-    retries: 60
-
-# База на каждый сервис: своя база — своя фидельность микросервису, свой потолок соединений и
-# своя изоляция при отказе. Потолок ниже суммы флотов (120 на сервис при бюджете 100): поломку
-# порядка выдачи мест ловит сама база (FATAL: sorry, too many clients already), а запас больше
-# того, что занимает стенд сам (7–9 соединений), поэтому psql оператора и сборщик проходят при
-# полном флоте.
-x-postgres: &postgres
-  image: postgres:16-alpine
-  mem_limit: 512m
-  environment:
-    POSTGRES_DB: ${POSTGRES_DB:-demo}
-    POSTGRES_USER: ${POSTGRES_USER:-app}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-  command:
-    - postgres
-    - -c
-    - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
-    - -c
-    - shared_buffers=256MB
-  volumes:
-    - ./db/init:/docker-entrypoint-initdb.d:ro
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
-    interval: 3s
-    timeout: 3s
-    retries: 20
-
-x-exporter: &exporter
-  image: prometheuscommunity/postgres-exporter:v0.20.1
-  mem_limit: 256m
-  command:
-    - --collector.stat_activity
-    - --collector.stat_activity_autovacuum
-    - --web.listen-address=:9187
-  healthcheck:
-    test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
-    interval: 10s
-    timeout: 5s
-    start_period: 20s
-    retries: 20
-
-x-loadgen: &loadgen
-  build: ./loadgen
-  environment: &loadgen-env
-    WORKERS: ${WORKERS:-4}
-    WORK_MS: ${WORK_MS:-25}
-    THINK_MS: ${THINK_MS:-0}
-    REPORT_MS: ${REPORT_MS:-2000}
-    DURATION_S: ${DURATION_S:-0}
-  restart: unless-stopped
+#
+# Файл плоский, без YAML-якорей: каждый сервис самодостаточен и читается сверху вниз. Общий env
+# инстансов повторяется в каждом из четырёх блоков групп целиком — повторение принято как плата
+# за читаемость. Границу по сервису держат явные поля каждого блока группы (SERVICE_NAME, DB_URL,
+# метки точки входа web-a/web-b), а не якорь: у инстанса не может оказаться база чужого сервиса,
+# если эти поля согласованы в одном файле.
+# etcd, otel-collector, prometheus и grafana не параметризуются: их хост-порты зашиты, и в окружении
+# переменных для них больше нет.
 
 services:
-  postgres-a:
-    <<: *postgres
-    ports:
-      - "${POSTGRES_PORT_A:-5432}:5432"
-    volumes:
-      - pg-data-a:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
-
-  postgres-b:
-    <<: *postgres
-    ports:
-      - "${POSTGRES_PORT_B:-5433}:5432"
-    volumes:
-      - pg-data-b:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
-
   etcd:
     image: quay.io/coreos/etcd:v3.6.15
     command:
@@ -216,8 +31,8 @@ services:
       - --initial-cluster-state=new
       - --log-level=warn
     ports:
-      - "${ETCD_PORT:-2379}:2379"
-      - "${ETCD_PEER_PORT:-2380}:2380"
+      - "2379:2379"
+      - "2380:2380"
     volumes:
       - etcd-data:/etcd-data
     healthcheck:
@@ -226,53 +41,265 @@ services:
       timeout: 3s
       retries: 20
 
-  # Провижинер конфигурации, две реплики. Работает один на сервис (выборы лидера по
-  # {root}/provisioner/leader/{service}/): появление узла регистрации инстанса -> в его путь
-  # кладутся отсутствующие стартовые ключи hikari/*, исчезновение узла -> весь префикс удаляется.
-  config-provisioner-1:
-    <<: *provisioner
+  # База на каждый сервис: своя база — своя фидельность микросервису, свой потолок соединений и
+  # своя изоляция при отказе. Потолок ниже суммы флотов (120 на сервис при бюджете 100): поломку
+  # порядка выдачи мест ловит сама база (FATAL: sorry, too many clients already), а запас больше
+  # того, что занимает стенд сам (7–9 соединений), поэтому psql оператора и сборщик проходят при
+  # полном флоте.
+  postgres-a:
+    image: postgres:16-alpine
+    mem_limit: 512m
     environment:
-      <<: *provisioner-env
-      PROV_NAME: provisioner-1
+      POSTGRES_DB: ${POSTGRES_DB:-demo}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
+      - -c
+      - shared_buffers=256MB
+    ports:
+      - "${POSTGRES_PORT_A:-5432}:5432"
+    volumes:
+      - pg-data-a:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
-  config-provisioner-2:
-    <<: *provisioner
+  postgres-b:
+    image: postgres:16-alpine
+    mem_limit: 512m
     environment:
-      <<: *provisioner-env
-      PROV_NAME: provisioner-2
+      POSTGRES_DB: ${POSTGRES_DB:-demo}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
+      - -c
+      - shared_buffers=256MB
+    ports:
+      - "${POSTGRES_PORT_B:-5433}:5432"
+    volumes:
+      - pg-data-b:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Провижинер конфигурации: один масштабируемый сервис, число реплик задаёт make up
+  # (--scale config-provisioner=$(PROV_REPLICAS), дефолт 2). Работает один на сервис (выборы
+  # лидера по {root}/provisioner/leader/{service}/): появление узла регистрации инстанса -> в его
+  # путь кладутся отсутствующие стартовые ключи hikari/*, исчезновение узла -> весь префикс
+  # удаляется. Ключи кладутся атомарно и только если их ещё нет (txn «ключа нет → put»): ручные
+  # правки оператора не затираются ни одной из реплик. Имя реплики — из окружения (HOSTNAME
+  # контейнера), явное PROV_NAME не задаётся, как у сервисов.
+  config-provisioner:
+    image: hikari-etcd/config-provisioner:local
+    build: ./provisioner
+    mem_limit: 512m
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      PROV_ETCD_ENDPOINTS: http://etcd:2379
+      PROV_ETCD_ROOT: ${ETCD_ROOT:-/config}
+      PROV_ACTIVE_MAX_CONNECTIONS: ${PROV_ACTIVE_MAX_CONNECTIONS:-100}
+      PROV_ACTIVE_MIN_CONNECTIONS: ${PROV_ACTIVE_MIN_CONNECTIONS:-1}
+      PROV_INACTIVE_MAX_CONNECTIONS: ${PROV_INACTIVE_MAX_CONNECTIONS:-1}
+      PROV_MAX_SHARE: ${PROV_MAX_SHARE:-200}
+      PROV_LEADER_TTL: ${PROV_LEADER_TTL:-10s}
+      # Доля запросов, попадающих в трассу: 1.0 — всё, меньше — меньше помехи.
+      OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+      # Адреса точки приёма сигналов: по умолчанию дверь стенда, переопределение — для проверки
+      # «наблюдение недоступно, провижининг работает».
+      OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+      OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+      OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
+    healthcheck:
+      # Живость — только ping: провижининг переживает обрывы etcd сам.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/liveness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 60s
+      retries: 60
 
   # --- инстансы: четыре группы, число реплик задаёт make up (--scale A_G1=2 A_G2=2 B_G1=2 B_G2=2) ---
   # В блоке группы нет ничего про инстанс: ни имени, ни порта, ни POOL_NAME. Идентичность у
   # реплики из окружения (ETCD_INSTANCE → POD_NAME → HOSTNAME), группа — их отличие. depends_on на
   # провизора нет намеренно: конфигурация нагоняется по факту регистрации узла (окно
-  # «зарегистрирован, но ещё не провижен» закрывает гейт трафика).
+  # «зарегистрирован, но ещё не провижен» закрывает гейт трафика). Общий env повторён в каждом
+  # блоке целиком: файл плоский, и согласованность блоков видна при чтении одного файла.
   service-a-group-1:
-    <<: *service-a
+    image: hikari-etcd/service:local
+    build: ./service
+    mem_limit: 512m
     environment:
-      <<: *service-a-env
+      DB_USER: ${POSTGRES_USER:-app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      # Размер пула приходит только из etcd: локального размера нет вовсе, POOL_MAX_SIZE тоже нет.
+      # true = после расширения пула сразу открыть нужное число коннектов (демо).
+      POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
+      # Таймауты приходят только отсюда, из etcd не читаются: правка требует перезапуска инстанса.
+      # Короткое значение — способ воспроизвести 503 перегруза (насыщенный пул не берёт коннект).
+      POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
+      POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
+      ETCD_ENDPOINTS: http://etcd:2379
+      ETCD_ROOT: ${ETCD_ROOT:-/config}
+      OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+      OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+      OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+      OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
+      SERVICE_NAME: service-a
+      DB_URL: jdbc:postgresql://postgres-a:5432/${POSTGRES_DB:-demo}
       ETCD_GROUP: group-1
+    healthcheck:
+      # Готовность (гейт конфигурации), а не общий health: живость от etcd не зависит.
+      # Это docker-здоровье, по которому make up и wait-ready ждут готовности флота; балансировщик
+      # готовность опрашивает сам, своим healthcheck (см. метки ниже).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 90s
+      retries: 60
+    depends_on:
+      postgres-a:
+        condition: service_healthy
+    labels:
+      # Метки Traefik на сервис (fleet-service-a): реплики группы несут одинаковые метки, и Traefik
+      # сам дедуплицирует их в один роутер; границу по сервису держат отдельные точки входа web-a/web-b.
+      traefik.enable: "true"
+      traefik.http.routers.fleet-service-a.rule: "PathPrefix(`/`)"
+      traefik.http.routers.fleet-service-a.entrypoints: "web-a"
+      traefik.http.routers.fleet-service-a.service: "fleet-service-a"
+      traefik.http.services.fleet-service-a.loadbalancer.server.port: "8080"
+      # Исключение неготового экземпляра — не позднее одного периода опроса готовности: интервал
+      # опроса 1с накладывается на /actuator/health/readiness, который честно отдаёт 503 при
+      # закрытом гейте конфигурации. Docker-healthcheck для этого не годится (retries 60 × 5с).
+      traefik.http.services.fleet-service-a.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+      traefik.http.services.fleet-service-a.loadbalancer.healthcheck.interval: "1s"
 
   service-a-group-2:
-    <<: *service-a
+    image: hikari-etcd/service:local
+    build: ./service
+    mem_limit: 512m
     environment:
-      <<: *service-a-env
+      DB_USER: ${POSTGRES_USER:-app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
+      POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
+      POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
+      ETCD_ENDPOINTS: http://etcd:2379
+      ETCD_ROOT: ${ETCD_ROOT:-/config}
+      OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+      OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+      OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+      OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
+      SERVICE_NAME: service-a
+      DB_URL: jdbc:postgresql://postgres-a:5432/${POSTGRES_DB:-demo}
       ETCD_GROUP: group-2
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 90s
+      retries: 60
+    depends_on:
+      postgres-a:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.fleet-service-a.rule: "PathPrefix(`/`)"
+      traefik.http.routers.fleet-service-a.entrypoints: "web-a"
+      traefik.http.routers.fleet-service-a.service: "fleet-service-a"
+      traefik.http.services.fleet-service-a.loadbalancer.server.port: "8080"
+      traefik.http.services.fleet-service-a.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+      traefik.http.services.fleet-service-a.loadbalancer.healthcheck.interval: "1s"
 
   service-b-group-1:
-    <<: *service-b
+    image: hikari-etcd/service:local
+    build: ./service
+    mem_limit: 512m
     environment:
-      <<: *service-b-env
+      DB_USER: ${POSTGRES_USER:-app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
+      POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
+      POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
+      ETCD_ENDPOINTS: http://etcd:2379
+      ETCD_ROOT: ${ETCD_ROOT:-/config}
+      OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+      OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+      OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+      OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
+      SERVICE_NAME: service-b
+      DB_URL: jdbc:postgresql://postgres-b:5432/${POSTGRES_DB:-demo}
       ETCD_GROUP: group-1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 90s
+      retries: 60
+    depends_on:
+      postgres-b:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.fleet-service-b.rule: "PathPrefix(`/`)"
+      traefik.http.routers.fleet-service-b.entrypoints: "web-b"
+      traefik.http.routers.fleet-service-b.service: "fleet-service-b"
+      traefik.http.services.fleet-service-b.loadbalancer.server.port: "8080"
+      traefik.http.services.fleet-service-b.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+      traefik.http.services.fleet-service-b.loadbalancer.healthcheck.interval: "1s"
 
   service-b-group-2:
-    <<: *service-b
+    image: hikari-etcd/service:local
+    build: ./service
+    mem_limit: 512m
     environment:
-      <<: *service-b-env
+      DB_USER: ${POSTGRES_USER:-app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POOL_EAGER_FILL: ${POOL_EAGER_FILL:-true}
+      POOL_CONNECTION_TIMEOUT_MS: ${POOL_CONNECTION_TIMEOUT_MS:-30000}
+      POOL_DRAIN_TIMEOUT: ${POOL_DRAIN_TIMEOUT:-3s}
+      ETCD_ENDPOINTS: http://etcd:2379
+      ETCD_ROOT: ${ETCD_ROOT:-/config}
+      OTEL_TRACES_SAMPLING: ${OTEL_TRACES_SAMPLING:-1.0}
+      OTEL_METRICS_URL: ${OTEL_METRICS_URL:-http://otel-collector:4318/v1/metrics}
+      OTEL_TRACES_URL: ${OTEL_TRACES_URL:-http://otel-collector:4318/v1/traces}
+      OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
+      SERVICE_NAME: service-b
+      DB_URL: jdbc:postgresql://postgres-b:5432/${POSTGRES_DB:-demo}
       ETCD_GROUP: group-2
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 90s
+      retries: 60
+    depends_on:
+      postgres-b:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.fleet-service-b.rule: "PathPrefix(`/`)"
+      traefik.http.routers.fleet-service-b.entrypoints: "web-b"
+      traefik.http.routers.fleet-service-b.service: "fleet-service-b"
+      traefik.http.services.fleet-service-b.loadbalancer.server.port: "8080"
+      traefik.http.services.fleet-service-b.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+      traefik.http.services.fleet-service-b.loadbalancer.healthcheck.interval: "1s"
 
   # Балансировщик: docker-провайдер, роутеры и сервисы состава — метки на контейнерах инстансов.
-  # Файлового провайдера и статического списка бэкендов больше нет: список берётся из docker
-  # (что развёрнуто — то и балансируется), а границу по сервису держат две точки входа: web-a
+  # Файлового провайдера и статического списка бэкендов нет: список берётся из docker (что
+  # развёрнуто — то и балансируется), а границу по сервису держат две точки входа: web-a
   # обслуживает только service-a, web-b — только service-b.
   #
   # Процесс один, точек входа две: web-a (80), web-b (81). depends_on на инстансы НЕ нужен:
@@ -304,31 +331,41 @@ services:
   # списка целей в одной — намеренно: у каждой своя гистограмма задержек и своя строка итога, и
   # отчёты двух прогонов не смешивают две базы (LoadGen.java при этом не меняется).
   # TARGET адресует балансировщик по порту: 80 обслуживает service-a, 81 — service-b.
-  # depends_on на конкретный инстанс убрать пришлось: реплики создаются числом (--scale), и
-  # адресация к «первому» неоднозначна. Нагрузчик стартует, когда поднялись балансировщик и его
-  # база; первые секунды, пока флот ещё поднимается, он честно считает 503 ошибками — это
-  # загрузочное окно, а не поведение механизма.
+  # depends_on на конкретный инстанс нет: реплики создаются числом (--scale), и адресация к
+  # «первому» неоднозначна. Нагрузчик стартует, когда поднялись балансировщик и его база; первые
+  # секунды, пока флот ещё поднимается, он честно считает 503 ошибками — это загрузочное окно,
+  # а не поведение механизма.
   loadgen-a:
-    <<: *loadgen
+    build: ./loadgen
+    restart: unless-stopped
     depends_on:
       lb:
         condition: service_healthy
       postgres-a:
         condition: service_healthy
     environment:
-      <<: *loadgen-env
-      # TARGET — через балансировщик; состояние пула снимается в наблюдении, не здесь
+      WORKERS: ${WORKERS:-4}
+      WORK_MS: ${WORK_MS:-25}
+      THINK_MS: ${THINK_MS:-0}
+      REPORT_MS: ${REPORT_MS:-2000}
+      DURATION_S: ${DURATION_S:-0}
+      # TARGET — через балансировщик; состояние пула снимается в наблюдении, не здесь.
       TARGET: http://lb:80
 
   loadgen-b:
-    <<: *loadgen
+    build: ./loadgen
+    restart: unless-stopped
     depends_on:
       lb:
         condition: service_healthy
       postgres-b:
         condition: service_healthy
     environment:
-      <<: *loadgen-env
+      WORKERS: ${WORKERS:-4}
+      WORK_MS: ${WORK_MS:-25}
+      THINK_MS: ${THINK_MS:-0}
+      REPORT_MS: ${REPORT_MS:-2000}
+      DURATION_S: ${DURATION_S:-0}
       TARGET: http://lb:81
 
   # --- наблюдение: единая дверь сигналов и её хранилища, сборщик метрик, сборщик метрик базы,
@@ -356,8 +393,8 @@ services:
     ports:
       # Приём сигналов приложений (4318) и текстовая точка метрик двери (9464) — её опрашивает
       # сборщик, а по 9464 видно состояние двери и без сборщика (docker compose ps, curl).
-      - "${OTLP_PORT:-4318}:4318"
-      - "${OTEL_METRICS_PORT:-9464}:9464"
+      - "4318:4318"
+      - "9464:9464"
 
   # Хранилище трасс. Тома нет намеренно (см. otel/tempo.yaml): история нужна на разбор перехода,
   # а не как постоянное хранилище.
@@ -409,7 +446,7 @@ services:
       # конфигурации совпадают с путями в репозитории, поэтому правила не надо перечислять поимённо.
       - ./prometheus:/etc/prometheus:ro
     ports:
-      - "${PROM_PORT:-9090}:9090"
+      - "9090:9090"
     healthcheck:
       # /-/ready: сборщик отвечает, когда он действительно готов принимать цели, а не просто запущен.
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9090/-/ready"]
@@ -425,7 +462,12 @@ services:
   # поэтому видны сессии всех инстансов, а зарезервированные слоты не занимаются флотом).
   # Отдельная роль с pg_monitor для боевого контура.
   postgres-exporter-a:
-    <<: *exporter
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    mem_limit: 256m
+    command:
+      - --collector.stat_activity
+      - --collector.stat_activity_autovacuum
+      - --web.listen-address=:9187
     environment:
       DATA_SOURCE_NAME: >-
         postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres-a:5432/${POSTGRES_DB:-demo}?sslmode=disable
@@ -434,15 +476,32 @@ services:
       PG_EXPORTER_COLLECTOR_STAT_ACTIVITY: "true"
     ports:
       - "${EXPORTER_PORT_A:-9187}:9187"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 20
 
   postgres-exporter-b:
-    <<: *exporter
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    mem_limit: 256m
+    command:
+      - --collector.stat_activity
+      - --collector.stat_activity_autovacuum
+      - --web.listen-address=:9187
     environment:
       DATA_SOURCE_NAME: >-
         postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres-b:5432/${POSTGRES_DB:-demo}?sslmode=disable
       PG_EXPORTER_COLLECTOR_STAT_ACTIVITY: "true"
     ports:
       - "${EXPORTER_PORT_B:-9188}:9187"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9187/metrics"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 20
 
   # Витрина метрик: источник данных и панели поставляются из репозитория, правки в интерфейсе
   # перезаписываются при перезапуске (поставщик панелей запрещает сохранение).
@@ -464,7 +523,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "3000:3000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
       interval: 10s
@@ -474,7 +533,11 @@ services:
 
   # Инструмент для ручной работы с конфигом: make config / make set-size N
   etcdctl:
-    <<: *etcdctl
+    image: hikari-etcd/etcdctl:local
+    build: ./etcd
+    environment:
+      ETCDCTL_ENDPOINTS: http://etcd:2379
+      ETCDCTL_API: "3"
     entrypoint: ["etcdctl"]
     depends_on:
       etcd:

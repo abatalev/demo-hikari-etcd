@@ -13,8 +13,11 @@ A_G1 ?= 2
 A_G2 ?= 2
 B_G1 ?= 2
 B_G2 ?= 2
+# Число реплик провизора (как у инстансных групп, дефолт 2 = лидер + резерв; больше не нужно —
+# третья реплика ничего не добавляет, выборы — поллинг O(N·M)).
+PROV_REPLICAS ?= 2
 FLEET_GROUPS = service-a-group-1 service-a-group-2 service-b-group-1 service-b-group-2
-REPLICAS = service-a-group-1=$(A_G1) service-a-group-2=$(A_G2) service-b-group-1=$(B_G1) service-b-group-2=$(B_G2)
+REPLICAS = service-a-group-1=$(A_G1) service-a-group-2=$(A_G2) service-b-group-1=$(B_G1) service-b-group-2=$(B_G2) config-provisioner=$(PROV_REPLICAS)
 # аргументы --scale для docker compose up
 scale_args = $(foreach r,$(REPLICAS),--scale $(r))
 ETCD_ROOT ?= /config

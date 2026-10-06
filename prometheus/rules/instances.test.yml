@@ -28,21 +28,21 @@ tests:
   - name: "у всех инстансов есть ряды: молчания нет"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
+      - series: 'pool_config_state{node="37480b2401c3",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
+      - series: 'pool_config_state{node="fa21ced238a2",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
+      - series: 'pool_config_state{node="8a8838ec795b",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
+      - series: 'pool_config_state{node="a044cd9caa71",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
+      - series: 'pool_config_state{node="62e1a198bf79",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
+      - series: 'pool_config_state{node="a6e4b033934e",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
+      - series: 'pool_config_state{node="85b9ac599dce",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="757f19a309f5",state="applied"}'
+      - series: 'pool_config_state{node="e983b2d575f9",state="applied"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 9m
@@ -52,21 +52,21 @@ tests:
   - name: "у одного инстанса рядов нет: срабатывает именно он"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
+      - series: 'pool_config_state{node="37480b2401c3",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
+      - series: 'pool_config_state{node="fa21ced238a2",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
+      - series: 'pool_config_state{node="8a8838ec795b",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
+      - series: 'pool_config_state{node="a044cd9caa71",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
+      - series: 'pool_config_state{node="62e1a198bf79",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
+      - series: 'pool_config_state{node="a6e4b033934e",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
+      - series: 'pool_config_state{node="85b9ac599dce",state="applied"}'
         values: '1x10'
-      # service-b/group-2/757f19a309f5 отправить ничего не смог: процесса нет
+      # service-b/group-2/e983b2d575f9 отправить ничего не смог: процесса нет
       # или отправка не доходит.
     alert_rule_test:
       - eval_time: 1m
@@ -77,31 +77,31 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              node: 757f19a309f5
+              node: e983b2d575f9
             exp_annotations:
-              summary: Инстанс 757f19a309f5 молчит в наблюдении
+              summary: Инстанс e983b2d575f9 молчит в наблюдении
               description: >-
-                service-b/group-2/757f19a309f5: нет ряда pool_config_state — процесс не присылает метрики либо
+                service-b/group-2/e983b2d575f9: нет ряда pool_config_state — процесс не присылает метрики либо
                 отправка в точку приёма не доходит. Состав стенда: make check-instances.
 
   - name: "ряд пропал и вернулся: молчание снимается само"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
+      - series: 'pool_config_state{node="37480b2401c3",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
+      - series: 'pool_config_state{node="fa21ced238a2",state="applied"}'
         values: '1x3 _x8 1x3'
-      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
+      - series: 'pool_config_state{node="8a8838ec795b",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
+      - series: 'pool_config_state{node="a044cd9caa71",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
+      - series: 'pool_config_state{node="62e1a198bf79",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
+      - series: 'pool_config_state{node="a6e4b033934e",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
+      - series: 'pool_config_state{node="85b9ac599dce",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="757f19a309f5",state="applied"}'
+      - series: 'pool_config_state{node="e983b2d575f9",state="applied"}'
         values: '1x10'
     alert_rule_test:
       # Ряд последний раз приходил на 3-й минуте: до 8-й он ещё «жив»
@@ -118,11 +118,11 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              node: e875c1e8d9ef
+              node: fa21ced238a2
             exp_annotations:
-              summary: Инстанс e875c1e8d9ef молчит в наблюдении
+              summary: Инстанс fa21ced238a2 молчит в наблюдении
               description: >-
-                service-a/group-1/e875c1e8d9ef: нет ряда pool_config_state — процесс не присылает метрики либо
+                service-a/group-1/fa21ced238a2: нет ряда pool_config_state — процесс не присылает метрики либо
                 отправка в точку приёма не доходит. Состав стенда: make check-instances.
       # Ряд вернулся на 12-й минуте: молчание снято само, без вмешательства.
       - eval_time: 13m

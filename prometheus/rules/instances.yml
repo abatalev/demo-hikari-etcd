@@ -33,90 +33,90 @@ groups:
   - name: instances
     rules:
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="261e9a4d5b5e"})
+        expr: absent(pool_config_state{node="37480b2401c3"})
         for: 2m
         labels:
           severity: warning
-          node: 261e9a4d5b5e
+          node: 37480b2401c3
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-a/group-1/261e9a4d5b5e: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-a/group-1/37480b2401c3: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="e875c1e8d9ef"})
+        expr: absent(pool_config_state{node="fa21ced238a2"})
         for: 2m
         labels:
           severity: warning
-          node: e875c1e8d9ef
+          node: fa21ced238a2
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-a/group-1/e875c1e8d9ef: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-a/group-1/fa21ced238a2: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="7103d2afd25d"})
+        expr: absent(pool_config_state{node="8a8838ec795b"})
         for: 2m
         labels:
           severity: warning
-          node: 7103d2afd25d
+          node: 8a8838ec795b
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-a/group-2/7103d2afd25d: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-a/group-2/8a8838ec795b: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="9c5ae4153d54"})
+        expr: absent(pool_config_state{node="a044cd9caa71"})
         for: 2m
         labels:
           severity: warning
-          node: 9c5ae4153d54
+          node: a044cd9caa71
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-a/group-2/9c5ae4153d54: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-a/group-2/a044cd9caa71: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="52b983ac44e4"})
+        expr: absent(pool_config_state{node="62e1a198bf79"})
         for: 2m
         labels:
           severity: warning
-          node: 52b983ac44e4
+          node: 62e1a198bf79
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-b/group-1/52b983ac44e4: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-b/group-1/62e1a198bf79: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="966bb59cc8ed"})
+        expr: absent(pool_config_state{node="a6e4b033934e"})
         for: 2m
         labels:
           severity: warning
-          node: 966bb59cc8ed
+          node: a6e4b033934e
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-b/group-1/966bb59cc8ed: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-b/group-1/a6e4b033934e: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="3dc111c06a09"})
+        expr: absent(pool_config_state{node="85b9ac599dce"})
         for: 2m
         labels:
           severity: warning
-          node: 3dc111c06a09
+          node: 85b9ac599dce
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-b/group-2/3dc111c06a09: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-b/group-2/85b9ac599dce: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.
       - alert: InstanceSilent
-        expr: absent(pool_config_state{node="757f19a309f5"})
+        expr: absent(pool_config_state{node="e983b2d575f9"})
         for: 2m
         labels:
           severity: warning
-          node: 757f19a309f5
+          node: e983b2d575f9
         annotations:
           summary: "Инстанс {{ $labels.node }} молчит в наблюдении"
           description: >-
-            service-b/group-2/757f19a309f5: нет ряда pool_config_state — процесс не присылает метрики либо
+            service-b/group-2/e983b2d575f9: нет ряда pool_config_state — процесс не присылает метрики либо
             отправка в точку приёма не доходит. Состав стенда: make check-instances.

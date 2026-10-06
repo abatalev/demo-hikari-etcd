@@ -169,7 +169,7 @@ public class ProvisionerProperties {
         this.leaderTtl = leaderTtl;
     }
 
-    /** Имя реплики: явное {@code PROV_NAME}, иначе hostname, иначе «provisioner». */
+    /** Имя реплики: явное {@code PROV_NAME}, иначе {@code POD_NAME}, иначе hostname (в контейнере — короткий ID). */
     public String resolveName() {
         if (name != null && !name.isBlank()) {
             return name.trim();

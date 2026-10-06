@@ -117,7 +117,7 @@ while :; do
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "ТАЙМАУТ (${WAIT_S}с): не готовы: ${failing[*]}" >&2
-        echo "проверь etcd и провижинеров: docker compose ps etcd config-provisioner-1 config-provisioner-2; docker compose logs config-provisioner-1 config-provisioner-2" >&2
+        echo "проверь etcd и провижинеров: docker compose ps etcd config-provisioner; docker compose logs config-provisioner" >&2
         echo "расклад по инстансам: make instances; сводка: make pool" >&2
         exit 1
     fi

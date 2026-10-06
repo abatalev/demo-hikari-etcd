@@ -25,7 +25,7 @@
 ```bash
 make instances                    # правильный ли путь у каждого инстанса (вывод из docker compose ps)
 docker compose ps                 # все ли сервисные контейнеры живы
-docker compose logs config-provisioner-1 config-provisioner-2   # обеспечил ли провизор ключи зарегистрированных узлов
+docker compose logs config-provisioner   # обеспечил ли провизор ключи зарегистрированных узлов
 make pool                         # ready, path, ключи по всем инстансам сразу
 make config I=<hex>               # ключи конфигурации одного инстанса
 ```
@@ -38,8 +38,8 @@ make config I=<hex>               # ключи конфигурации одно
 ### Инстанс `ready=DOWN`, причина «конфигурация не получена: … нет распознанных ключей»
 
 В пути инстанса нет ни одного ключа из `EtcdKeys.ALL`. Причины: провизор ещё не обеспечил ключи
-(сверьте `docker compose ps config-provisioner-1 config-provisioner-2` и
-`docker compose logs config-provisioner-1 config-provisioner-2`;
+(сверьте `docker compose ps config-provisioner` и
+`docker compose logs config-provisioner`;
 провизор кладёт ключи по факту регистрации узла), путь не совпал (сервис смотрит в другой путь —
 см. `path` в деталях `readiness`), ключи удалили (см. «Ключи инстанса исчезли из etcd» ниже), либо инстанс
 в неактивной группе при нулевом резерве флота (`R=0` — холод, конфигурация не выдаётся намеренно).
@@ -75,7 +75,7 @@ docker logs --tail=50 <hex-ID>                       # "etcd недоступе�
   восстановится при перерегистрации узлов; ручные правки в этом окне теряются — держите нужные
   значения в `.env` (`PROV_CONNECTION_TIMEOUT_MS`) или восстановите руками.
 
-Проверить, кто удалил: `docker compose logs config-provisioner-1 config-provisioner-2` — строки
+Проверить, кто удалил: `docker compose logs config-provisioner` — строки
 «очистка: удалено N ключей префикса …». Ключи **бюджета** (`{service}/activeMaxConnections`,
 `{service}/activeMinConnections`, `{service}/inactiveMaxConnections`) при этом не удаляются никогда —
 см. следующий раздел.
@@ -151,7 +151,7 @@ docker logs --tail=30 <hex-ID>     # «освобождаем соединени
 - **Префикс пуст — лидеров нет.** Провизор не выиграл выборы: смотрите логи обеих реплик. У
   штатной реплики в любом состоянии должна жить аренда («аренда выборов получена lease=N»), иначе
   подозревайте `PROV_LEADER_TTL`/`PROV_CALL_TIMEOUT` или недоступность etcd. Расклад по логам:
-  `docker compose logs --tail=100 config-provisioner-1 config-provisioner-2`.
+  `docker compose logs --tail=100 config-provisioner`.
 - **На сервис два лидера (оба пишут).** В нормальной работе невозможно: в префиксе сервиса всегда
   один старейший ключ. «Оба пишут» на практике означает, что задержка перехвата дольше ожидаемой —
   уцелевший лидер продолжает действовать до истечения своей аренды даже после краха второго узла
@@ -247,7 +247,7 @@ docker compose up -d
 ### Балансировщик отдаёт 404 или не обслуживает инстансы
 
 `404` на `:8080`/`:8081` — у точки входа нет маршрута к флоту. Маршруты генерирует
-**docker-провайдер** из меток Traefik на общих блоках сервисов (`x-service-a`/`x-service-b` в
+**docker-провайдер** из меток Traefik на блоках групп (`service-a-group-1`...`service-b-group-2` в
 `docker-compose.yml`): роутер `fleet-<service>` на entrypoint `web-a`/`web-b`, сервис на 8080 и
 healthcheck `/actuator/health/readiness` с периодом 1с. Метки одинаковы у всех реплик группы —
 это намеренно: Traefik дедуплицирует их в один роутер, конфликтов в журнале нет, а новый инстанс
@@ -280,9 +280,11 @@ docker-провайдер включён и видит docker.sock (`traefik/tra
 
 ### etcd
 
+Порт etcd зашит в `docker-compose.yml` (`2379` клиентский / `2380` peer): etcd на стенде не
+переопределяется, переменные `ETCD_PORT`/`ETCD_PEER_PORT` удалены.
+
 | переменная | дефолт | куда |
 |---|---|---|
-| `ETCD_PORT` / `ETCD_PEER_PORT` | `2379` / `2380` | порты на хосте |
 | `ETCD_ROOT` | `/config` | корень ключей; путь инстанса: `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/` |
 | `A_G1` / `A_G2` / `B_G1` / `B_G2` | `2` / `2` / `2` / `2` | число реплик групп `service-a`/`service-b` (см. ниже) |
 
@@ -319,15 +321,18 @@ docker-провайдер включён и видит docker.sock (`traefik/tra
 
 ### провизор (config-provisioner)
 
-Провижер запускается двумя репликами (`config-provisioner-1`, `config-provisioner-2`), работает
+Провижер запускается одним масштабируемым сервисом `config-provisioner` (`--scale`, число реплик —
+`PROV_REPLICAS`, дефолт 2; имена контейнеров `config-provisioner-1`/`-2` — суффиксы scale). Работает
 по одному на сервис: лидер выбирается узлами `{root}/provisioner/leader/{service}/`, набор сервисов
-реплика выводит сама из узлов регистрации. Кто ведёт какой сервис: `make leader`.
+реплика выводит сама из узлов регистрации. Имя реплики (значение лидер-ключа, признак `replica`) —
+из окружения контейнера (`HOSTNAME`: `PROV_NAME` → `POD_NAME` → `HOSTNAME`), в compose не задаётся.
+Кто ведёт какой сервис: `make leader`.
 
 | переменная | дефолт | примечание |
 |---|---|---|
 | `PROV_ETCD_ENDPOINTS` | `http://etcd:2379` | endpoints etcd для провизора |
 | `PROV_ETCD_ROOT` | `${ETCD_ROOT}` `/config` | корень ключей — тот же, что у сервисов |
-| `PROV_NAME` | hostname | имя реплики — значение лидер-ключа; в compose задано явно (`provisioner-1`/`-2`), не дублируй в `.env` |
+| `PROV_NAME` | hostname | имя реплики — значение лидер-ключа; цепочка `PROV_NAME` → `POD_NAME` → `HOSTNAME` (в контейнере = короткий ID), в compose не задаётся |
 | `PROV_LEADER_TTL` | `10s` | TTL аренды выборов: после краха лидера запасной перехватывает сервис в пределах TTL |
 | `PROV_ACTIVE_MAX_CONNECTIONS` | `100` | бюджет активного флота N, если ключа `{root}/services/{service}/activeMaxConnections` нет (кладётся put-if-absent) |
 | `PROV_ACTIVE_MIN_CONNECTIONS` | `1` | минимальная активная доля m, если ключа `{root}/services/{service}/activeMinConnections` нет |
@@ -343,13 +348,15 @@ docker-провайдер включён и видит docker.sock (`traefik/tra
 
 | переменная | дефолт | примечание |
 |---|---|---|
-| `OTLP_PORT` | `4318` | порт приёма сигналов приложений (метрики, трассы и журналы — на одном) |
-| `OTEL_METRICS_PORT` | `9464` | текстовая точка метрик двери: её опрашивает сборщик (единственный источник метрик приложений) и по ней видно состояние двери без сборщика |
 | `TEMPO_PORT` | `3200` | хранилище трасс |
 | `LOKI_PORT` | `3100` | хранилище журналов |
 | `OTEL_TRACES_SAMPLING` | `1.0` | доля запросов, попадающих в трассу; события механизма отбираются всегда, независимо от доли. Под долгой нагрузкой снижайте (0.01), переход в трассах останется |
 | `OTEL_METRICS_URL` / `OTEL_TRACES_URL` / `OTEL_LOGS_URL` | адрес двери стенда | адреса отправки; переопределение нужно, чтобы проверить, что отправка не влияет на пул и трафик |
 | `OTEL_METRICS_STEP` | `5s` | как часто отправляются метрики; столько же, сколько сборщик опрашивал инстанс, — величины в панелях и правилах не меняются |
+
+Порты двери (`4318` — приём сигналов, `9464` — текстовая точка метрик) и сборщика/витрины
+(`9090`/`3000`) зашиты в `docker-compose.yml`; переменных `OTLP_PORT`/`OTEL_METRICS_PORT`/
+`PROM_PORT`/`GRAFANA_PORT` больше нет.
 
 ### сервисы (по инстансу)
 
@@ -647,10 +654,10 @@ docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 25
 
 | адрес | что это |
 |---|---|
-| `localhost:9090` | сборщик метрик (Prometheus), порт из `PROM_PORT` |
-| `localhost:3000` | витрина (Grafana), анонимный просмотр без логина, порт из `GRAFANA_PORT` |
-| `localhost:4318` | дверь сигналов (`otel-collector`), приём OTLP от приложений, порт из `OTLP_PORT` |
-| `localhost:9464` | текстовая точка метрик **двери** — единственный источник метрик приложений и провизёра, порт из `OTEL_METRICS_PORT` |
+| `localhost:9090` | сборщик метрик (Prometheus), порт зашит в `docker-compose.yml` |
+| `localhost:3000` | витрина (Grafana), анонимный просмотр без логина, порт зашит |
+| `localhost:4318` | дверь сигналов (`otel-collector`), приём OTLP от приложений, порт зашит |
+| `localhost:9464` | текстовая точка метрик **двери** — единственный источник метрик приложений и провизёра, порт зашит |
 | `localhost:3200` | хранилище трасс (`tempo`), порт из `TEMPO_PORT` |
 | `localhost:3100` | хранилище журналов (`loki`), порт из `LOKI_PORT` |
 | `localhost:9187` | сборщик метрик базы `service-a` (`postgres-exporter-a`), порт из `EXPORTER_PORT_A` |
@@ -904,7 +911,7 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
 
 | симптом | что делать |
 |---|---|
-| `make targets` не отвечает | `docker compose ps prometheus`, `docker compose logs prometheus`; порт меняется в `PROM_PORT` |
+| `make targets` не отвечает | `docker compose ps prometheus`, `docker compose logs prometheus` (порт `9090` зашит) |
 | цель `door` в состоянии `down` | дверь не поднялась или отдавать нечего: `docker compose logs otel-collector` (в её журнале видны и отказы по отдельным сигналам), `curl -fsS localhost:9464/metrics` |
 | `make check-instances` называет инстансы без рядов | по одному: стенд остановился (`make pool`), либо отправка в дверь не доходит — проверьте адрес в `OTEL_METRICS_URL`; недоступная дверь отключает наблюдение целиком |
 | ряды пропадают у всех сразу, а приложения живы | дверь отказывает в метриках по памяти: `docker compose logs otel-collector \| grep -i 'dropped\|reject'`. Ограничителей три, по одному на сигнал, и метрики отказываются последними — но при полном заполнении отказать могут и они |
@@ -949,7 +956,8 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
 ### Балансировка
 
 - **Неготовый инстанс исключается не мгновенно.** Traefik (docker-провайдер) опрашивает
-  `/actuator/health/readiness` каждые 1с (интервал задан в метках `x-service-a`/`x-service-b` в
+  `/actuator/health/readiness` каждые 1с (интервал задан в метках блоков групп
+  `service-a-group-1`...`service-b-group-2` в
   `docker-compose.yml`), поэтому между потерей готовности и исчезновением
   инстанса из ротации есть окно — на стенде замерено около секунды. В это окно клиент получает
   отказ напрямую: повторов запроса у другого инстанса нет, и это осознанный размен.

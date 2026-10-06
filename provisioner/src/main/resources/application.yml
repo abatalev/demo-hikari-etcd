@@ -43,13 +43,14 @@ management:
       # и журналов общих тегов нет, и без него в Tempo и Loki реплики неразличимы. service.instance.id
       # не задаётся намеренно: он превратился бы в признак instance на рядах метрик, а этот признак
       # у сборщика — адрес цели, и переопределять его нельзя.
-      replica: ${PROV_NAME:unknown}
+      replica: ${provision.name:unknown}
   metrics:
     tags:
-      # Имя реплики — то же значение, что в ключе выборов, поэтому по метрикам видно, кто считал
-      # величины. На стенде PROV_NAME задан явно; локально без него метка будет unknown, а выборы
-      # пойдут по имени хоста (см. ProvisionerProperties.resolveName).
-      replica: ${PROV_NAME:unknown}
+      # Имя реплики — то же значение, что в ключе выборов (provision.name, см. ниже), поэтому по
+      # метрикам видно, кто считал величины. Источник один — цепочка PROV_NAME → POD_NAME → HOSTNAME.
+      # При пустом окружении метка упадёт в unknown, а выборы пойдут по имени хоста
+      # (см. ProvisionerProperties.resolveName) — в контейнере HOSTNAME всегда задан.
+      replica: ${provision.name:unknown}
   endpoint:
     health:
       show-details: always
@@ -84,8 +85,10 @@ provision:
   call-timeout: ${PROV_CALL_TIMEOUT:5s}
   retry-initial-backoff: ${PROV_RETRY_INITIAL:1s}
   retry-max-backoff: ${PROV_RETRY_MAX:30s}
-  # Имя реплики для выборов лидера (пусто = фолбэк на hostname); TTL аренды выборов.
-  name: ${PROV_NAME:}
+  # Имя реплики для выборов лидера: цепочка как у сервиса (явное PROV_NAME → POD_NAME → HOSTNAME),
+  # в контейнере HOSTNAME = короткий ID, он же значение лидер-ключа и метка replica. Тот же
+  # источник используют метрики и ресурс-признак (${provision.name} выше). Пусто = фолбэк на hostname.
+  name: ${PROV_NAME:${POD_NAME:${HOSTNAME:}}}
   leader-ttl: ${PROV_LEADER_TTL:10s}
 
 logging:
