@@ -1029,7 +1029,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (application_name, state) (pg_stat_activity_count{application_name=~\"$pool_app\"})",
+          "expr": "sum by (application_name, state) (label_replace(count by (node) (pool_maximum_pool_size{service=~\"$service\",group=~\"$group\",node=~\"$node\"}), \"application_name\", \"$1\", \"node\", \"(.+)\") * on(application_name) group_left (pg_stat_activity_count{application_name=~\"$pool_app\"}))",
           "legendFormat": "{{application_name}}/{{state}}",
           "datasource": {
             "type": "prometheus",
@@ -1037,7 +1037,7 @@
           }
         }
       ],
-      "description": "Взгляд со стороны postgres: application_name равен имени инстанса (POOL_NAME). Отбор ведётся переменной $pool_app — при смене соглашения об именах правится она одна."
+      "description": "Взгляд со стороны postgres: application_name равен имени узла регистрации (POOL_NAME = имени инстанса, приходит из окружения). Сессии отбираются join'ом с метриками пула, а не шаблоном имён: имени у инстанса в конфигурации нет, а psql и сборщик базы в панель по join'у не попадают. $pool_app — только фильтр детализации."
     },
     {
       "type": "timeseries",
@@ -1111,7 +1111,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (node) (pool_connections_open{service=~\"$service\",group=~\"$group\",node=~\"$node\"}) - on(node) sum by (node) (label_replace(sum by (application_name) (pg_stat_activity_count{application_name=~\"$pool_app\"}), \"node\", \"$1\", \"application_name\", \"(.*)\"))",
+          "expr": "sum by (node) (pool_connections_open{service=~\"$service\",group=~\"$group\",node=~\"$node\"}) - on(node) sum by (node) (label_replace(sum by (application_name) (pg_stat_activity_count{application_name=~\"$pool_app\"}), \"node\", \"$1\", \"application_name\", \"(.+)\") * on(node) count by (node) (pool_maximum_pool_size{service=~\"$service\",group=~\"$group\",node=~\"$node\"}))",
           "legendFormat": "{{node}} расхождение",
           "datasource": {
             "type": "prometheus",
@@ -1214,14 +1214,14 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+        "definition": "label_values(count by (node) (pool_maximum_pool_size), node)",
         "query": {
-          "query": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+          "query": "label_values(count by (node) (pool_maximum_pool_size), node)",
           "refId": "var-pool_app"
         },
         "includeAll": true,
         "multi": true,
-        "allValue": "service-.+",
+        "allValue": ".*",
         "refresh": 1,
         "sort": 1,
         "current": {

@@ -11,30 +11,58 @@
 #
 # База на сервис, поэтому сервис обязателен: шаблон имени без него на двух базах
 # выглядел бы как один флот, а это ровно та путаница, которой адресация избегает.
-# Шаблон по умолчанию — инстансы этого сервиса, а не 'service-%': сумма берётся по
-# пулам одного сервиса, как и сравнивается с его бюджетом.
+# Default PATTERN='-' означает «пулы сервиса» — IN-список из узлов регистрации etcd
+# (scripts/reg-nodes.py): application_name пула равен имени узла регистрации, имена
+# приходят из окружения, и никакой шаблон имён их не перечисляет.
 #
-# Использование: measure-fleet.sh <service> [seconds] [шаблон имени] [период, с]
+# Использование: measure-fleet.sh <service> [seconds] [шаблон имени или '-'=авто] [период, с]
 set -eu
 SERVICE="${1:-}"
 if [ -z "$SERVICE" ]; then
-    echo "укажи сервис: measure-fleet.sh service-a [seconds] [шаблон] [период, с]" >&2
+    echo "укажи сервис: measure-fleet.sh service-a [seconds] [шаблон] [период]" >&2
     exit 1
 fi
 SECS="${2:-20}"
-PATTERN="${3:-${SERVICE}-group-%}"
+PATTERN="${3:--}"
 PERIOD="${4:-0.1}"
+
+ROOT="${ETCD_ROOT:-/config}"
+
+if [ "$PATTERN" = "-" ]; then
+    NODES="$(docker compose run --rm --no-deps -T etcdctl get --prefix "${ROOT}/services/" -w json \
+        | python3 "$(dirname "$0")/reg-nodes.py" "${ROOT}/" "$SERVICE")"
+    if [ -z "$NODES" ]; then
+        echo "нет зарегистрированных узлов сервиса $SERVICE (etcd недоступен или стенд не поднят)" >&2
+        exit 1
+    fi
+    NODE_LIST="$(printf '%s\n' "$NODES" | sed "s/^/'/; s/$/'/" | paste -sd, -)"
+    WHERE="application_name = ANY (ARRAY[${NODE_LIST}])"
+    DESC="узлы регистрации (${NODE_LIST})"
+else
+    WHERE="application_name LIKE '${PATTERN}'"
+    DESC="шаблон ${PATTERN}"
+fi
+
+# Порт базы на хосте: у сервиса свой (база на сервис), PGPORT в окружении — в приоритете.
+PORT="${PGPORT:-}"
+if [ -z "$PORT" ]; then
+    case "$SERVICE" in
+        service-b) PORT="${POSTGRES_PORT_B:-5433}" ;;
+        *) PORT="${POSTGRES_PORT_A:-5432}" ;;
+    esac
+fi
+PSQL="psql -p $PORT -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-demo}"
 
 # Потолок печатаем вместе с шапкой: смотреть на превышение без потолка бессмысленно.
 # Недоступность справки о потолке замеру не мешает, поэтому ошибка не фатальна.
-CEILING="$(psql -U "${POSTGRES_USER:-app}" -d "${POSTGRES_DB:-demo}" -At \
+CEILING="$("$PSQL" -At \
     -c "SELECT current_setting('max_connections')" 2>/dev/null || echo '?')"
-printf 'база сервиса %s, потолок соединений %s, шаблон %s, период %sс, длительность %sс\n' \
-    "$SERVICE" "$CEILING" "$PATTERN" "$PERIOD" "$SECS"
+printf 'база сервиса %s, потолок соединений %s, отбор %s, период %sс, длительность %sс\n' \
+    "$SERVICE" "$CEILING" "$DESC" "$PERIOD" "$SECS"
 
 # Замеры идут по generate_series, пауза между ними — pg_sleep. Первый ряд печатается
 # без паузы (справедливость: до него сон не нужен), остальные — после предыдущей.
-psql -U "${POSTGRES_USER:-app}" -d "${POSTGRES_DB:-demo}" -At -c "
+"$PSQL" -At -c "
 WITH RECURSIVE ticks AS (
     SELECT 0 AS i
     UNION ALL
@@ -46,6 +74,6 @@ SELECT to_char(clock_timestamp(), 'SS.MS') || ' ' || coalesce(ps.sessions, 0)
   CROSS JOIN LATERAL (
       SELECT coalesce(sum(sessions), 0) AS sessions
         FROM pool_sessions
-       WHERE application_name LIKE '${PATTERN}'
+       WHERE ${WHERE}
   ) AS ps
  ORDER BY ticks.i"

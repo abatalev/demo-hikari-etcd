@@ -25,17 +25,15 @@ tests:
         values: '100 125 100 100 100 100 100 100 100 100'
       - series: 'provision_fleet_sum_held_peak_since_reset{replica="provisioner-1",service="service-a"}'
         values: '100 125 125 125 125 125 125 125 125 125'
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="e8f3a1c2d4b6"}'
         values: '50x10'
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="b6d4c2a1f3e8"}'
         values: '50x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="e8f3a1c2d4b6",state="idle"}'
         values: '50x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="b6d4c2a1f3e8",state="idle"}'
         values: '50x10'
-      - series: 'up{job="provisioner",instance="config-provisioner-1:8080"}'
-        values: '1x10'
-      - series: 'up{job="service",instance="service-a-group-1-1:8080"}'
+      - series: 'up{job="door",instance="otel-collector:9464"}'
         values: '1x10'
     alert_rule_test:
       # Оценка и её максимум выше бюджета — не нарушение: так выглядит переход, когда инстанс
@@ -66,13 +64,13 @@ tests:
         values: '100x10'
       - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
         values: '100x5 125x5'
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="e8f3a1c2d4b6"}'
         values: '60x10'
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="b6d4c2a1f3e8"}'
         values: '65x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="e8f3a1c2d4b6",state="idle"}'
         values: '60x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="b6d4c2a1f3e8",state="idle"}'
         values: '65x10'
     alert_rule_test:
       # Пока сумма в бюджете — молчит. Границу ожидания (for: 30s) не проверяем точно: шаг
@@ -102,13 +100,13 @@ tests:
       - series: 'provision_fleet_sum_ceilings{replica="provisioner-1",service="service-a"}'
         values: '100x10'
       # Учёт провизёра в норме, а база видит больше: место отдано без освобождения.
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-1"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="e8f3a1c2d4b6"}'
         values: '50x10'
-      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="service-a-group-1-2"}'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="b6d4c2a1f3e8"}'
         values: '50x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-1",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="e8f3a1c2d4b6",state="idle"}'
         values: '80x10'
-      - series: 'pg_stat_activity_count{application_name="service-a-group-1-2",state="idle"}'
+      - series: 'pg_stat_activity_count{application_name="b6d4c2a1f3e8",state="idle"}'
         values: '50x10'
     alert_rule_test:
       - eval_time: 9m
@@ -129,6 +127,31 @@ tests:
                 Сервис service-a: пулы занимают 130 соединений при бюджете активного флота меньше.
                 Потолок max_connections пробит на деле: либо провизёр отдал место без освобождения,
                 либо соединения держит неучтённый владелец.
+
+  - name: "имена инстансов в hex: join считает только сессии пулов"
+    interval: 1m
+    input_series:
+      # Имена инстансов приходят из окружения (docker compose ps → HOSTNAME): короткий hex-ID
+      # контейнера, у пула он же application_name. Шаблон имён здесь не работает — сессии
+      # отбираются join'ом с метриками пула.
+      - series: 'provision_fleet_budget_active{replica="provisioner-1",service="service-a"}'
+        values: '100x10'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="e8f3a1c2d4b6"}'
+        values: '50x10'
+      - series: 'pool_maximum_pool_size{service="service-a",group="group-1",node="b6d4c2a1f3e8"}'
+        values: '50x10'
+      - series: 'pg_stat_activity_count{application_name="e8f3a1c2d4b6",state="idle"}'
+        values: '50x10'
+      - series: 'pg_stat_activity_count{application_name="b6d4c2a1f3e8",state="idle"}'
+        values: '50x10'
+      # Сессия не-пула (psql оператора, сборщик базы): узла пула с таким именем нет, join её из
+      # суммы флота выбрасывает — правило обязано молчать даже при 90 таких сессиях сверху.
+      - series: 'pg_stat_activity_count{application_name="psql",state="active"}'
+        values: '90x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FleetConnectionsExceedBudget
+        exp_alerts: []
 
   - name: "зависшее сжатие: правило держится на текущем состоянии, а не на истории"
     interval: 1m

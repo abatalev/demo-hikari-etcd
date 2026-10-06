@@ -1,9 +1,11 @@
 name: hikari-etcd-stand
 
 # Схема стенда: база на сервис, балансировщик и точка нагрузки на сервис, сборщик метрик на базу.
-# Восемь инстансов (по четыре на сервис) делят один etcd с бюджетами, но у каждого сервиса своя
-# база, свой потолок соединений и своя изоляция при отказе. Механизму разделение безразлично:
-# бюджет и доли живут в etcd, адрес базы приходит локально в DB_URL.
+# Состав задаётся числом реплик четырёх групп (make up --scale A_G1=2 ...); инстанс
+# идентифицирует себя сам, из окружения: ETCD_INSTANCE, иначе POD_NAME, иначе HOSTNAME (короткий
+# ID контейнера) — см. service/src/main/resources/application.yml. Ни перечня инстансов, ни
+# хост-портов в конфигурации нет: список развёрнутого — только docker compose ps. Механизму
+# разделение безразлично: бюджет и доли живут в etcd, адрес базы приходит локально в DB_URL.
 
 # Образ с etcdctl для ручных правок конфигурации из Makefile (make config / set-size и т.п.).
 x-etcdctl: &etcdctl
@@ -13,10 +15,11 @@ x-etcdctl: &etcdctl
     ETCDCTL_ENDPOINTS: http://etcd:2379
     ETCDCTL_API: "3"
 
-# Общая часть инстанса сервиса, одинаковая для обоих сервисов. Восемь копий отличаются
-# SERVICE_NAME/ETCD_GROUP/ETCD_INSTANCE (сегменты пути конфигурации), POOL_NAME (иначе
-# pool_sessions склеит пулы) и портом хоста. Канонический список инстансов с портами —
-# ETCD_INSTANCES в .env (см. make instances).
+# Общая часть инстанса сервиса, одинаковая для обоих сервисов. Реплики группы отличаются только
+# группой (ETCD_GROUP) и тем, что им даёт окружение: сервис — SERVICE_NAME, инстанс и POOL_NAME —
+# цепочки дефолтов в application.yml (HOSTNAME в контейнере = короткий ID, и он же имя узла
+# регистрации и application_name пула). До 8080 реплики не публикуются вовсе: наружу флот отдаёт
+# балансировщик, и у инстанса нет ни имени, ни порта, которые можно было бы зафиксировать.
 x-service: &service-base
   image: hikari-etcd/service:local
   build: ./service
@@ -45,15 +48,19 @@ x-service: &service-base
     OTEL_LOGS_URL: ${OTEL_LOGS_URL:-http://otel-collector:4318/v1/logs}
   healthcheck:
     # Готовность (гейт конфигурации), а не общий health: живость от etcd не зависит.
+    # Это docker-здоровье, по которому make up и wait-ready ждут готовности флота; балансировщик
+    # готовность опрашивает сам, своим healthcheck (см. метки x-service-a/x-service-b).
     test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
     interval: 5s
     timeout: 3s
     start_period: 90s
     retries: 60
 
-# Часть инстанса, различающаяся по сервису: ровно два свойства — адрес базы и условие готовности,
-# по которому инстанс дожидается своей базы. Всё остальное общее. Разделение здесь, а не в восьми
-# блоках инстансов, гарантирует, что у инстанса не может оказаться база чужого сервиса.
+# Часть инстанса, различающаяся по сервису: адрес базы, условие готовности по своей базе, имя
+# сервиса и метки Traefik. Разделение здесь, а не в блоках инстансов, гарантирует, что у инстанса
+# не может оказаться база чужого сервиса и метки чужой точки входа. Имена роутера и сервиса на
+# балансировщике — на сервис (fleet-service-a): реплики одной группы несут одинаковые метки, и
+# Traefik сам дедуплицирует их в один роутер; границу по сервису держат отдельные точки входа.
 x-service-a: &service-a
   <<: *service-base
   depends_on:
@@ -61,7 +68,19 @@ x-service-a: &service-a
       condition: service_healthy
   environment: &service-a-env
     <<: *service-env
+    SERVICE_NAME: service-a
     DB_URL: jdbc:postgresql://postgres-a:5432/${POSTGRES_DB:-demo}
+  labels: &service-a-labels
+    traefik.enable: "true"
+    traefik.http.routers.fleet-service-a.rule: "PathPrefix(`/`)"
+    traefik.http.routers.fleet-service-a.entrypoints: "web-a"
+    traefik.http.routers.fleet-service-a.service: "fleet-service-a"
+    traefik.http.services.fleet-service-a.loadbalancer.server.port: "8080"
+    # Исключение неготового экземпляра — не позднее одного периода опроса готовности: интервал
+    # опроса 1с накладывается на /actuator/health/readiness, который честно отдаёт 503 при
+    # закрытом гейте конфигурации. Docker-healthcheck для этого не годится (retries 60 × 5с).
+    traefik.http.services.fleet-service-a.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+    traefik.http.services.fleet-service-a.loadbalancer.healthcheck.interval: "1s"
 
 x-service-b: &service-b
   <<: *service-base
@@ -70,7 +89,16 @@ x-service-b: &service-b
       condition: service_healthy
   environment: &service-b-env
     <<: *service-env
+    SERVICE_NAME: service-b
     DB_URL: jdbc:postgresql://postgres-b:5432/${POSTGRES_DB:-demo}
+  labels: &service-b-labels
+    traefik.enable: "true"
+    traefik.http.routers.fleet-service-b.rule: "PathPrefix(`/`)"
+    traefik.http.routers.fleet-service-b.entrypoints: "web-b"
+    traefik.http.routers.fleet-service-b.service: "fleet-service-b"
+    traefik.http.services.fleet-service-b.loadbalancer.server.port: "8080"
+    traefik.http.services.fleet-service-b.loadbalancer.healthcheck.path: "/actuator/health/readiness"
+    traefik.http.services.fleet-service-b.loadbalancer.healthcheck.interval: "1s"
 
 # Общий блок провизинера конфигурации (две реплики). Работает один на сервис: лидер выбирается
 # узлами {root}/provisioner/leader/{service}/, набор сервисов провизор выводит сам из узлов
@@ -107,20 +135,13 @@ x-provisioner: &provisioner
     retries: 60
 
 # База на каждый сервис: своя база — своя фидельность микросервису, свой потолок соединений и
-# своя изоляция при отказе. Механизму база безразлична: адрес приходит локально из DB_URL, бюджет
-# и доли живут в etcd, поэтому разделение — свойство обвязки стенда, а не поведения механизма.
-#
-# Потолок 120 = бюджет активного флота 100 + запас 20. Число выведено из двух ограничений
-# сразу, и оба важны:
-#   запас МЕНЬШЕ доли (100/4 = 25) — тогда превышение сверх потолка отказывает база, а поломку
-#     порядка выдачи мест (она стоит одну долю) ловит сама база, а не только правило по метрике;
-#   запас БОЛЬШЕ того, что занимает стенд сам (7-9 соединений) — иначе psql оператора и сборщик
-#     метрик начинали бы конкурировать с флотом, и отказ служебной сессии выглядел бы как поломка
-#     механизма. 20 против 8-9 оставляет 11-12 мест.
-# 10 не годится (ложные тревоги), 50 делает потолок декоративным. Роль стенда — суперпользователь,
-# поэтому зарезервированные слоты не занимаются флотом: сборщик и psql проходят даже при отказе.
+# своя изоляция при отказе. Потолок ниже суммы флотов (120 на сервис при бюджете 100): поломку
+# порядка выдачи мест ловит сама база (FATAL: sorry, too many clients already), а запас больше
+# того, что занимает стенд сам (7–9 соединений), поэтому psql оператора и сборщик проходят при
+# полном флоте.
 x-postgres: &postgres
-  image: postgres:16
+  image: postgres:16-alpine
+  mem_limit: 512m
   environment:
     POSTGRES_DB: ${POSTGRES_DB:-demo}
     POSTGRES_USER: ${POSTGRES_USER:-app}
@@ -130,7 +151,7 @@ x-postgres: &postgres
     - -c
     - max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
     - -c
-    - log_min_duration_statement=500
+    - shared_buffers=256MB
   volumes:
     - ./db/init:/docker-entrypoint-initdb.d:ro
   healthcheck:
@@ -220,118 +241,52 @@ services:
       <<: *provisioner-env
       PROV_NAME: provisioner-2
 
-  # --- инстансы service-a (группы group-1, group-2) ---
-  service-a-group-1-1:
+  # --- инстансы: четыре группы, число реплик задаёт make up (--scale A_G1=2 A_G2=2 B_G1=2 B_G2=2) ---
+  # В блоке группы нет ничего про инстанс: ни имени, ни порта, ни POOL_NAME. Идентичность у
+  # реплики из окружения (ETCD_INSTANCE → POD_NAME → HOSTNAME), группа — их отличие. depends_on на
+  # провизора нет намеренно: конфигурация нагоняется по факту регистрации узла (окно
+  # «зарегистрирован, но ещё не провижен» закрывает гейт трафика).
+  service-a-group-1:
     <<: *service-a
     environment:
       <<: *service-a-env
-      SERVICE_NAME: service-a
       ETCD_GROUP: group-1
-      ETCD_INSTANCE: service-a-group-1-1
-      POOL_NAME: service-a-group-1-1
-    ports:
-      - "18081:8080"
 
-  service-a-group-1-2:
+  service-a-group-2:
     <<: *service-a
     environment:
       <<: *service-a-env
-      SERVICE_NAME: service-a
+      ETCD_GROUP: group-2
+
+  service-b-group-1:
+    <<: *service-b
+    environment:
+      <<: *service-b-env
       ETCD_GROUP: group-1
-      ETCD_INSTANCE: service-a-group-1-2
-      POOL_NAME: service-a-group-1-2
-    ports:
-      - "18082:8080"
 
-  service-a-group-2-1:
-    <<: *service-a
-    environment:
-      <<: *service-a-env
-      SERVICE_NAME: service-a
-      ETCD_GROUP: group-2
-      ETCD_INSTANCE: service-a-group-2-1
-      POOL_NAME: service-a-group-2-1
-    ports:
-      - "18083:8080"
-
-  service-a-group-2-2:
-    <<: *service-a
-    environment:
-      <<: *service-a-env
-      SERVICE_NAME: service-a
-      ETCD_GROUP: group-2
-      ETCD_INSTANCE: service-a-group-2-2
-      POOL_NAME: service-a-group-2-2
-    ports:
-      - "18084:8080"
-
-  # --- инстансы service-b (группы group-1, group-2) ---
-  service-b-group-1-1:
+  service-b-group-2:
     <<: *service-b
     environment:
       <<: *service-b-env
-      SERVICE_NAME: service-b
-      ETCD_GROUP: group-1
-      ETCD_INSTANCE: service-b-group-1-1
-      POOL_NAME: service-b-group-1-1
-    ports:
-      - "18085:8080"
-
-  service-b-group-1-2:
-    <<: *service-b
-    environment:
-      <<: *service-b-env
-      SERVICE_NAME: service-b
-      ETCD_GROUP: group-1
-      ETCD_INSTANCE: service-b-group-1-2
-      POOL_NAME: service-b-group-1-2
-    ports:
-      - "18086:8080"
-
-  service-b-group-2-1:
-    <<: *service-b
-    environment:
-      <<: *service-b-env
-      SERVICE_NAME: service-b
       ETCD_GROUP: group-2
-      ETCD_INSTANCE: service-b-group-2-1
-      POOL_NAME: service-b-group-2-1
-    ports:
-      - "18087:8080"
 
-  service-b-group-2-2:
-    <<: *service-b
-    environment:
-      <<: *service-b-env
-      SERVICE_NAME: service-b
-      ETCD_GROUP: group-2
-      ETCD_INSTANCE: service-b-group-2-2
-      POOL_NAME: service-b-group-2-2
-    ports:
-      - "18088:8080"
-
-  # --- балансировка входящего трафика: одна точка входа на сервис (web-a -> service-a, web-b -> service-b) ---
+  # Балансировщик: docker-провайдер, роутеры и сервисы состава — метки на контейнерах инстансов.
+  # Файлового провайдера и статического списка бэкендов больше нет: список берётся из docker
+  # (что развёрнуто — то и балансируется), а границу по сервису держат две точки входа: web-a
+  # обслуживает только service-a, web-b — только service-b.
   #
-  # Список бэкендов НЕ перечислен здесь, а лежит в traefik/dynamic/fleet.yml и выводится из
-  # ETCD_INSTANCES командой make balancers (make up вызывает её перед стартом, make check-balancers
-  # сверяет, обе — в make test). Копия списка инстансов, написанная руками, разъезжалась бы с .env
-  # молча: nginx резолвил такие адреса один раз при старте и после пересоздания инстансов
-  # продолжал слать запросы по старым.
-  #
-  # Процесс один, точек входа две: web-a обслуживает только service-a, web-b — только service-b.
-  # Отдельные процессы ничего не добавляли — у lb-a и lb-b составы бэкендов не пересекались,
-  # поэтому падение одного не отправляло трафик в другой, а просто оставляло сервис без входа.
-  # depends_on на инстансы НЕ нужен: адрес, которого ещё нет, Traefik переносит и подхватывает
-  # сам, когда инстанс появится, поэтому ждать готовности всех восьми не требуется.
+  # Процесс один, точек входа две: web-a (80), web-b (81). depends_on на инстансы НЕ нужен:
+  # контейнер, которого ещё нет, провайдер увидит по событию docker, а неготовый исключит
+  # опросом здоровья (интервал 1с).
   lb:
-    image: traefik:v3.5
+    # v3.6, не ниже 3.6.1: docker-провайдер с 3.6.0 и ниже пинит API 1.24 и молчит на docker
+    # >= 29 (минимум API 1.40-1.44). Автодоговор версии API — traefik/traefik#12256 (3.6.1).
+    image: traefik:v3.6
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      # Каталогом, а не файлом: слежение за файлом при смонтированном файле не работает — ядро не
-      # доставляет события файловой системы внутрь контейнера по файловому bind-mount, и перечитывание
-      # не наступает никогда. Проверено: правка fleet.yml на месте (и заменой файла, и записью поверх)
-      # не меняла маршруты, пока каталог не смонтирован целиком.
-      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # Сокет docker только для чтения: провайдеру нужно видеть контейнеры и их метки, писать
+      # в docker он не должен.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     command: ["--configFile=/etc/traefik/traefik.yml"]
     mem_limit: 256m
     ports:
@@ -349,10 +304,16 @@ services:
   # списка целей в одной — намеренно: у каждой своя гистограмма задержек и своя строка итога, и
   # отчёты двух прогонов не смешивают две базы (LoadGen.java при этом не меняется).
   # TARGET адресует балансировщик по порту: 80 обслуживает service-a, 81 — service-b.
+  # depends_on на конкретный инстанс убрать пришлось: реплики создаются числом (--scale), и
+  # адресация к «первому» неоднозначна. Нагрузчик стартует, когда поднялись балансировщик и его
+  # база; первые секунды, пока флот ещё поднимается, он честно считает 503 ошибками — это
+  # загрузочное окно, а не поведение механизма.
   loadgen-a:
     <<: *loadgen
     depends_on:
-      service-a-group-1-1:
+      lb:
+        condition: service_healthy
+      postgres-a:
         condition: service_healthy
     environment:
       <<: *loadgen-env
@@ -362,7 +323,9 @@ services:
   loadgen-b:
     <<: *loadgen
     depends_on:
-      service-b-group-1-1:
+      lb:
+        condition: service_healthy
+      postgres-b:
         condition: service_healthy
     environment:
       <<: *loadgen-env
@@ -438,10 +401,12 @@ services:
       # Стенду хватает окна в пару часов: нужна история переходов для разбора, а не хранилище.
       # Постоянного тома нет намеренно — после перезапуска история теряется (см. docs/operations.md).
       - --storage.tsdb.retention.time=2h
+      # Перезагрузка правил по SIGHUP (make up после перегенерации правил молчания).
+      - --web.enable-lifecycle
     volumes:
       # Конфигурация и правила лежат в репозитории; правила молчания инстанса перегенерирует
-      # make silence-rules из ETCD_INSTANCES. Каталог целиком: пути в конфигурации совпадают с
-      # путями в репозитории, поэтому правила не надо перечислять поимённо.
+      # make silence-rules из живого состава docker compose ps. Каталог целиком: пути в
+      # конфигурации совпадают с путями в репозитории, поэтому правила не надо перечислять поимённо.
       - ./prometheus:/etc/prometheus:ro
     ports:
       - "${PROM_PORT:-9090}:9090"

@@ -42,7 +42,7 @@
 `/api/work` отвечает отдельным фильтром `TrafficGateFilter` до контроллера:
 
 ```json
-{ "error": "конфигурация не получена: в пути /config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/ нет распознанных ключей", "ok": false }
+{ "error": "конфигурация не получена: в пути /config/services/service-a/groups/group-1/instances/1f2e3d4c5b6a/hikari/ нет распознанных ключей", "ok": false }
 ```
 
 Отличается от 503 перегруза тем, что `durationMs`, `dbMs` и `rows` отсутствуют целиком — запрос
@@ -69,13 +69,13 @@ Health разбит на две группы с осознанной грани�
 Готовый инстанс:
 
 ```json
-{ "status": "UP", "components": { "db": { "status": "UP" }, "poolEtcd": { "status": "UP", "details": { "config-source": "конфигурация получена", "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/" } }, "readinessState": { "status": "UP" } } }
+{ "status": "UP", "components": { "db": { "status": "UP" }, "poolEtcd": { "status": "UP", "details": { "config-source": "конфигурация получена", "path": "/config/services/service-a/groups/group-1/instances/1f2e3d4c5b6a/hikari/" } }, "readinessState": { "status": "UP" } } }
 ```
 
 Не готовый (etcd ещё не отдал конфигурацию):
 
 ```json
-{ "status": "DOWN", "components": { "poolEtcd": { "status": "DOWN", "details": { "config-source": "трафик закрыт: конфигурация не получена", "path": "/config/services/service-a/groups/group-1/instances/service-a-group-1-1/hikari/", "reason": "конфигурация не получена: в пути ... нет распознанных ключей" } } } }
+{ "status": "DOWN", "components": { "poolEtcd": { "status": "DOWN", "details": { "config-source": "трафик закрыт: конфигурация не получена", "path": "/config/services/service-a/groups/group-1/instances/1f2e3d4c5b6a/hikari/", "reason": "конфигурация не получена: в пути ... нет распознанных ключей" } } } }
 ```
 
 Связь с etcd в деталях `readiness` (`details.poolEtcd.reason`) и в журнале инстанса; признаки
@@ -93,23 +93,24 @@ Health разбит на две группы с осознанной грани�
 одинаковые, поэтому расхождение здесь и там — всегда баг, а не неоднозначность. Если увидите в
 `prometheus/prometheus.yml` задачу сбора инстансов — это откат от штатного состояния.
 
-Признаки на всех доменных метриках: `service`, `group`, `node` (значения `SERVICE_NAME`,
-`ETCD_GROUP`, `ETCD_INSTANCE`). Метки `instance` нет — она зарезервирована сборщиком за адрес цели,
-а у приложений адреса цели теперь нет вовсе: одна цель на весь флот, и различать инстансы надо по
-`node`. У провизёра вместо них признак `replica` (`PROV_NAME`) и `service` у величин по сервису.
-Тот же набор признаков приложение кладёт и в ресурс сигнала (для трасс и журналов, где общих тегов
-метрик нет), поэтому по признакам инстанса находится и журнал, и трасса.
+Признаки на всех доменных метриках: `service`, `group`, `node` (значения из окружения: `SERVICE_NAME`,
+`ETCD_GROUP`, а `node` — имя инстанса: `ETCD_INSTANCE`, иначе `POD_NAME`, иначе `HOSTNAME` контейнера,
+то есть на compose-стенде короткий hex-ID контейнера). Метки `instance` нет — она зарезервирована
+сборщиком за адресом цели, а у приложений адреса цели теперь нет вовсе: одна цель на весь флот, и
+различать инстансы надо по `node`. У провизёра вместо них признак `replica` (`PROV_NAME`) и `service`
+у величин по сервису. Тот же набор признаков приложение кладёт и в ресурс сигнала (для трасс и
+журналов, где общих тегов метрик нет), поэтому по признакам инстанса находится и журнал, и трасса.
 
 ```text
 # HELP pool_connections_open открытые соединения обоих поколений
 # TYPE pool_connections_open gauge
-pool_connections_open{group="group-1",node="service-a-group-1-1",service="service-a"} 25.0
+pool_connections_open{group="group-1",node="1f2e3d4c5b6a",service="service-a"} 25.0
 # HELP pool_maximum_pool_size текущий потолок пула
 # TYPE pool_maximum_pool_size gauge
-pool_maximum_pool_size{group="group-1",node="service-a-group-1-1",service="service-a"} 25.0
+pool_maximum_pool_size{group="group-1",node="1f2e3d4c5b6a",service="service-a"} 25.0
 # HELP pool_traffic_gate_open инстанс готов принимать трафик
 # TYPE pool_traffic_gate_open gauge
-pool_traffic_gate_open{group="group-1",node="service-a-group-1-1",service="service-a"} 1.0
+pool_traffic_gate_open{group="group-1",node="1f2e3d4c5b6a",service="service-a"} 1.0
 # HELP hikaricp_connections_acquire_seconds …
 # TYPE hikaricp_connections_acquire_seconds histogram
 hikaricp_connections_acquire_seconds_count{…} 182

@@ -1,21 +1,26 @@
-# Проверка правил молчания инстанса: правило обязано молчать, когда ряды есть, срабатывать, когда
-# инстанса нет в рядах, и сниматься само, когда ряд вернулся. Проверяется в составе make test,
-# поэтому «правило молчит всегда» — тоже падение проверки, а не тихая дырка в наблюдении.
+# Проверка правил молчания инстанса: правило обязано молчать, когда ряды есть, срабатывать,
+# когда инстанса нет в рядах, и сниматься само, когда ряд вернулся. Проверяется в составе
+# make test, поэтому «правило молчит всегда» — тоже падение проверки, а не тихая дырка
+# в наблюдении.
 #
-# Ряд состояния пула берётся по одному на инстанс: настоящий ряд помечен state, и absent() смотрит
-# на отсутствие любого из них, поэтому одного ряда на инстанс достаточно.
+# Файл генерируется вместе с правилами (scripts/silence.py, make silence-rules): тест обязан
+# покрывать ровно текущий состав, иначе удаление инстанса из состава молча убрало бы и его
+# правило из-под проверки.
 #
-# Границу ожидания (for: 2m) проверяем не точно: шаг evaluation_interval здесь минутный, а в
-# сборщике 5с, поэтому фиксируем заведомо не наступившее и заведомо наступившее состояния.
+# Ряд состояния пула берётся по одному на инстанс: настоящий ряд помечен state, и absent()
+# смотрит на отсутствие любого из них, поэтому одного ряда на инстанс достаточно.
 #
-# Здесь промежуток без точек задаён восемью минутами, и это худший случай, а не обычный. В
-# сборщике ряд, пропавший из выдачи двери, помечается устаревшим на следующем опросе и отсутствием
-# становится сразу (на стенде от остановки инстанса до срабатывания прошло 160с: 30с, пока дверь
-# держит ряд после последней точки, плюс for 2м, плюс шаг проверки). Здесь же проверка правил не
-# знает про устаревание: у неё пропавший ряд остаётся живым ещё 5 минут (окно lookback), поэтому
-# восемь минут покрывают худший случай — когда дверь продолжает отдавать ряд без свежих точек, и
-# время срабатывания здесь считается от конца промежутка. Наборы проверяют правило, а не скорость
-# обнаружения: скорость измерена на стенде (docs/operations.md).
+# Границу ожидания (for: 2m) проверяем не точно: шаг evaluation_interval здесь минутный, а
+# в сборщике 5с, поэтому фиксируем заведомо не наступившее и заведомо наступившее состояния.
+#
+# Здесь промежуток без точек задан восьмью минутами, и это худший случай, а не обычный. В
+# сборщике ряд, пропавший из выдачи двери, помечается устаревшим на следующем опросе и
+# отсутствием становится сразу (на стенде от остановки инстанса до срабатывания прошло 160с:
+# 30с, пока дверь держит ряд после последней точки, плюс for 2м, плюс шаг проверки). Здесь же
+# проверка правил не знает про устаревание: у неё пропавший ряд остаётся живым ещё 5 минут
+# (окно lookback), поэтому восемь минут покрывают худший случай — когда дверь продолжает
+# отдавать ряд без свежих точек. Наборы проверяют правило, а не скорость обнаружения:
+# скорость измерена на стенде (docs/operations.md).
 rule_files:
   - instances.yml
 evaluation_interval: 1m
@@ -23,21 +28,21 @@ tests:
   - name: "у всех инстансов есть ряды: молчания нет"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="service-a-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-2-2",state="applied"}'
+      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-2-2",state="applied"}'
+      - series: 'pool_config_state{node="757f19a309f5",state="applied"}'
         values: '1x10'
     alert_rule_test:
       - eval_time: 9m
@@ -47,21 +52,22 @@ tests:
   - name: "у одного инстанса рядов нет: срабатывает именно он"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="service-a-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-2-2",state="applied"}'
+      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
         values: '1x10'
-      # service-b-group-2-2 отправить ничего не смог: процесса нет или отправка не доходит.
+      # service-b/group-2/757f19a309f5 отправить ничего не смог: процесса нет
+      # или отправка не доходит.
     alert_rule_test:
       - eval_time: 1m
         alertname: InstanceSilent
@@ -71,39 +77,36 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              node: service-b-group-2-2
+              node: 757f19a309f5
             exp_annotations:
-              summary: Инстанс service-b-group-2-2 молчит в наблюдении
+              summary: Инстанс 757f19a309f5 молчит в наблюдении
               description: >-
-                service-b/group-2/service-b-group-2-2: нет ряда pool_config_state — процесс не присылает
-                метрики либо отправка в точку приёма не доходит. Состав стенда: make check-instances.
+                service-b/group-2/757f19a309f5: нет ряда pool_config_state — процесс не присылает метрики либо
+                отправка в точку приёма не доходит. Состав стенда: make check-instances.
 
   - name: "ряд пропал и вернулся: молчание снимается само"
     interval: 1m
     input_series:
-      - series: 'pool_config_state{node="service-a-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="261e9a4d5b5e",state="applied"}'
         values: '1x10'
-      # Ряд пропадает на 8 минут (у проверки правил окно lookback — 5 минут), потом возвращается: как у
-      # процесса, который надолго перестал присылать метрики и снова заработал. Остальные
-      # инстансы молчат не по-настоящему, поэтому ряды у них на месте — иначе правило сработало бы
-      # ещё и на них.
-      - series: 'pool_config_state{node="service-a-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="e875c1e8d9ef",state="applied"}'
         values: '1x3 _x8 1x3'
-      - series: 'pool_config_state{node="service-a-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="7103d2afd25d",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-a-group-2-2",state="applied"}'
+      - series: 'pool_config_state{node="9c5ae4153d54",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-1",state="applied"}'
+      - series: 'pool_config_state{node="52b983ac44e4",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-1-2",state="applied"}'
+      - series: 'pool_config_state{node="966bb59cc8ed",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-2-1",state="applied"}'
+      - series: 'pool_config_state{node="3dc111c06a09",state="applied"}'
         values: '1x10'
-      - series: 'pool_config_state{node="service-b-group-2-2",state="applied"}'
+      - series: 'pool_config_state{node="757f19a309f5",state="applied"}'
         values: '1x10'
     alert_rule_test:
-      # Ряд последний раз приходил на 3-й минуте: до 8-й он ещё «жив» (lookback 5м), после —
-      # отсутствует. Окно for в 2м отсчитывается от 8-й, то есть срабатывание ожидается к 10-й.
+      # Ряд последний раз приходил на 3-й минуте: до 8-й он ещё «жив»
+      # (lookback 5м), после — отсутствует. Окно for в 2м отсчитывается
+      # от 8-й, то есть срабатывание ожидается к 10-й.
       - eval_time: 7m
         alertname: InstanceSilent
         exp_alerts: []
@@ -115,12 +118,12 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              node: service-a-group-1-2
+              node: e875c1e8d9ef
             exp_annotations:
-              summary: Инстанс service-a-group-1-2 молчит в наблюдении
+              summary: Инстанс e875c1e8d9ef молчит в наблюдении
               description: >-
-                service-a/group-1/service-a-group-1-2: нет ряда pool_config_state — процесс не присылает
-                метрики либо отправка в точку приёма не доходит. Состав стенда: make check-instances.
+                service-a/group-1/e875c1e8d9ef: нет ряда pool_config_state — процесс не присылает метрики либо
+                отправка в точку приёма не доходит. Состав стенда: make check-instances.
       # Ряд вернулся на 12-й минуте: молчание снято само, без вмешательства.
       - eval_time: 13m
         alertname: InstanceSilent

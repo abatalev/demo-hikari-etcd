@@ -876,7 +876,7 @@
           }
         }
       ],
-      "description": "Правда о потолке: сколько соединений пулы сервиса держат в postgres на самом деле. Место выдаётся только после освобождения, поэтому линия бюджета не должна пересекаться никогда, включая переход; об этом же правило FleetConnectionsExceedBudget. Выражение совпадает с выражением правила, отбор сессий пулов ведётся переменной $pool_app."
+      "description": "Правда о потолке: сколько соединений пулы сервиса держат в postgres на самом деле. Место выдаётся только после освобождения, поэтому линия бюджета не должна пересекаться никогда, включая переход; об этом же правило FleetConnectionsExceedBudget. Выражение совпадает с выражением правила: сессии пулов опознаются join'ом с метриками пула, а не шаблоном имён (имена инстансов приходят из окружения). $pool_app — только фильтр детализации."
     },
     {
       "type": "table",
@@ -1126,14 +1126,14 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+        "definition": "label_values(count by (node) (pool_maximum_pool_size), node)",
         "query": {
-          "query": "label_values(pg_stat_activity_count{application_name=~\"service-.+\"}, application_name)",
+          "query": "label_values(count by (node) (pool_maximum_pool_size), node)",
           "refId": "var-pool_app"
         },
         "includeAll": true,
         "multi": true,
-        "allValue": "service-.+",
+        "allValue": ".*",
         "refresh": 1,
         "sort": 1,
         "current": {

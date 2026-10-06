@@ -45,17 +45,22 @@ management:
       # у всех восьми одно и то же имя приложения. Тот же набор, что у метрик, и под теми же
       # именами. service.instance.id не задаётся намеренно: он превратился бы в признак instance
       # на рядах метрик, а этот признак у сборщика — адрес цели, и переопределять его нельзя.
-      service: ${SERVICE_NAME:unknown}
-      group: ${ETCD_GROUP:unknown}
-      node: ${ETCD_INSTANCE:unknown}
+      # Значения следуют за идентичностью из окружения (теми же цепочками дефолтов, что и сегменты
+      # пути конфигурации): признак node обязан совпадать с именем инстанса, а группа — с сегментом
+      # группы, иначе наблюдение и правила не сойдутся с путём в etcd.
+      service: ${pool.etcd.service:unknown}
+      group: ${pool.etcd.group:unknown}
+      node: ${pool.etcd.instance:unknown}
   metrics:
     tags:
       # Общие признаки: сборщик раскладывает метрики по флоту и по инстансам без настройки
       # на своей стороне. Признак называется node, а не instance: instance у сборщика —
-      # адрес цели, и переопределять его нельзя.
-      service: ${SERVICE_NAME:unknown}
-      group: ${ETCD_GROUP:unknown}
-      node: ${ETCD_INSTANCE:unknown}
+      # адрес цели, и переопределять его нельзя. Значения — те же цепочки дефолтов, что и для
+      # сегментов пути конфигурации (см. pool.etcd): node = имя инстанса, иначе правила молчания
+      # и сверки состава не найдут инстанс по имени узла регистрации.
+      service: ${pool.etcd.service:unknown}
+      group: ${pool.etcd.group:unknown}
+      node: ${pool.etcd.instance:unknown}
   endpoint:
     health:
       show-details: always
@@ -80,7 +85,7 @@ pool:
     jdbc-url: ${DB_URL:jdbc:postgresql://localhost:5432/demo}
     username: ${DB_USER:app}
     password: ${DB_PASSWORD:app}
-    pool-name: ${POOL_NAME:pool-service}
+    pool-name: ${POOL_NAME:${pool.etcd.instance:}}
     connection-timeout-ms: ${POOL_CONNECTION_TIMEOUT_MS:30000}
     idle-timeout-ms: ${POOL_IDLE_TIMEOUT_MS:600000}
     max-lifetime-ms: ${POOL_MAX_LIFETIME_MS:1800000}
@@ -97,12 +102,14 @@ pool:
     enabled: ${ETCD_ENABLED:true}
     endpoints: ${ETCD_ENDPOINTS:http://localhost:2379}
     # Путь ключей: {root}/services/{service}/groups/{group}/instances/{instance}/hikari/.
-    # group/instance — обязательные сегменты при enabled=true: задаются ETCD_GROUP/ETCD_INSTANCE
-    # либо POD_NAMESPACE/POD_NAME.
+    # group/instance — обязательные сегменты при enabled=true, и их имена приходят из окружения
+    # развёртывания, а не из статического перечня стенда: явное значение (ETCD_GROUP/ETCD_INSTANCE)
+    # имеет приоритет, затем имя пода/namespace (POD_NAME/POD_NAMESPACE), затем имя хоста (HOSTNAME;
+    # в docker-контейнере это его короткий ID, на k8s имя пода приходит раньше).
     root: ${ETCD_ROOT:/config}
     service: ${SERVICE_NAME:${spring.application.name}}
     group: ${ETCD_GROUP:${POD_NAMESPACE:}}
-    instance: ${ETCD_INSTANCE:${POD_NAME:}}
+    instance: ${ETCD_INSTANCE:${POD_NAME:${HOSTNAME:}}}
     call-timeout: ${ETCD_CALL_TIMEOUT:5s}
     retry-initial-backoff: ${ETCD_RETRY_INITIAL:1s}
     retry-max-backoff: ${ETCD_RETRY_MAX:30s}

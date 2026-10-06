@@ -5,6 +5,14 @@
 > инстансов с путями `/config/services/{service}/groups/{group}/instances/{instance}/hikari/…`, команды выше принимают
 > `I=`/`S=`/`G=` (см. README). Перцентили, форма сигнатуры (p50 близко к времени работы, p95/хвост —
 > очередь) и порядки величин остаются релевантными: та же HikariCP, те же настройки.
+>
+> После `dynamic-fleet-identity` имена инстансов в выдержках из журналов — исторические
+> (`service-a-group-1-1` и т.п.). На текущем стенде инстанс называет себя из окружения
+> (`ETCD_INSTANCE` → `POD_NAME` → `HOSTNAME`), то есть в журнале, в etcd и в `application_name`
+> фигурирует короткий hex-ID контейнера; число реплик задаётся `--scale`, а не списком.
+> Механизм (бюджет, доли, гейт, публикация долга) не менялся, поэтому приведённые величины
+> держатся и на новом стенде — пересъёмка подтвердила ключевые сценарии (рост и сжатие через
+> бюджет, холодный флот `R=0`, переходы бюджета без превышения N).
 
 Все цифры сняты с живого стенда (`make up`, PostgreSQL 16, etcd 3.6.15, ноутбук без тюнинга).
 Стенд: `loadgen` с 4 постоянными потоками по 25мс, если не указано иное. Пул = 10 по умолчанию,
@@ -30,11 +38,16 @@ docker compose up -d
 
 ## Рост и сжатие пула на живом сервисе
 
+Размер инстанса на текущем стенде — доля бюджета: **рост/сжатие задаются бюджетом** и применяются
+всеми инстансами сервиса сразу:
+
 ```bash
-make set-size SIZE=30
+make set-active-max-connections SIZE=108 S=service-a   # доли 4×25 -> 4×27
+make set-active-max-connections SIZE=100 S=service-a   # обратно 4×27 -> 4×25
 ```
 
-Через ~1с:
+Через ~1с после пересчёта (в прошлом замере — правка `maximumPoolSize` напрямую; суть та же:
+правка на лету через `ManagedPool.apply`, без пересоздания):
 
 ```json
 {"maximumPoolSize": 30, "total": 30, "active": 4, "idle": 26,
@@ -44,12 +57,13 @@ postgres: {"sessions": 30, "active": 5, "idle": 25}
 
 `total` стал ровно 30, а не «по мере надобности», потому что включён `eager-fill-on-resize`.
 `recreationCount` остался 0 — пул не пересоздавался, это правка через MBean. Запросы в полёте
-(4 потока в `pg_sleep`) не прервались.
-
-Сжатие:
+(4 потока в `pg_sleep`) не прервались. Сжатие — тот же бюджет вниз (числа выше исторические:
+30 → 5 одной правкой `maximumPoolSize`; на текущем стенде величина — доля бюджета, и
+`make set-size` работает только как краткий оверайд до ближайшего пересчёта — на насыщенном флоте
+провизор уводит `maximumPoolSize` обратно к доле за ~1с, проверено на стенде):
 
 ```bash
-make set-size SIZE=5
+make set-active-max-connections SIZE=100 S=service-a   # 4×27 -> 4×25
 ```
 
 | момент | maximumPoolSize | total | idle |
@@ -64,8 +78,12 @@ make set-size SIZE=5
 
 ## Перегрузка: 32 потока × 200мс при пуле в 3
 
+Пула в 3 на текущем стенде не задать: размер — доля бюджета (минимальная активная доля `m`),
+поэтому ниже — исторический замер на пуле, заданном вручную. Суть переносится на любой узкий пул
+(очередь на все потоки + `err` по таймауту ожидания соединения):
+
 ```bash
-make set-size SIZE=3
+make set-size SIZE=3                 # исторический способ; сегодня пул задаётся бюджетом
 WORKERS=32 WORK_MS=200 DURATION_S=20 make stress
 ```
 
@@ -351,8 +369,8 @@ Watch докатывается с backoff, успевшим вырасти до 
 Замеряется это не по установившемуся режиму, а непрерывно во время перехода, по сессиям postgres:
 
 ```bash
-docker compose exec -T postgres /tmp/measure-fleet.sh 25 'service-a%' 0.1   # сумма по флоту, 10 Гц
-docker compose exec -T postgres /tmp/measure-pools.sh 25 'service-a%'         # разбивка по инстансам
+docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 20 - 0.1   # сумма по флоту, 10 Гц
+docker compose exec -T postgres-a sh /tmp/measure-pools.sh service-a 20          # разбивка по инстансам
 ```
 
 Частота 10 Гц не избыточна: переход длится 0.3–0.8с, и при 4 Гц пик просто не попадает в выборку.
@@ -502,17 +520,19 @@ overshoot был не виден. Само сравнение с `max_connection
 make up
 make load-logs                        # в отдельном терминале, для фона
 
-make set-size SIZE=30                 # рост
-make set-size SIZE=5                  # сжатие
+make set-active-max-connections SIZE=108 S=service-a   # рост: доли 4×25 -> 4×27
+make set-active-max-connections SIZE=100 S=service-a   # сжатие: обратно 4×27 -> 4×25
 
-make set-size SIZE=3
+# перегрузка: узкий пул в прошлом замере задавался вручную (make set-size SIZE=3); сегодня
+# размер — доля бюджета, и узкая очередь получается узким бюджетом
 WORKERS=32 WORK_MS=200 DURATION_S=20 make stress
 
 # то же самое, но с расширением на ходу (в соседнем терминале, на ~12-й секунде)
-make set-size SIZE=30
+make set-active-max-connections SIZE=108 S=service-a
 WORKERS=32 WORK_MS=200 DURATION_S=32 make stress
 
-# плохой конфиг
+# плохой конфиг: путь инстанса взять из make config I=<hex> (name -> path)
+make config I=<hex>
 docker compose run --rm --no-deps etcdctl put "$PREFIX/maximumPoolSize" 0
 docker compose run --rm --no-deps etcdctl put "$PREFIX/maximumPoolSize" banana
 
@@ -521,22 +541,22 @@ docker compose stop etcd && sleep 15 && docker compose start etcd
 
 # переход бюджета: замер суммы флота на 10 Гц в фоне, переключение группы в соседнем терминале
 docker compose cp scripts/measure-fleet.sh postgres-a:/tmp/measure-fleet.sh
-docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 25
+docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 20
 make set-group-active G=group-2 ACTIVE=false
 
-# потолок базы как противник: бюджет выше потолка его базы (120)
-make set-active-max-connections SIZE=150 S=service-a
-docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 30
-make fleet-sessions S=service-a          # refused: psql к базе не проходит
+# потолок базы как противник: бюджет равен потолку его базы (120) — флот съедает все слоты
+make set-active-max-connections SIZE=120 S=service-a
+docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 20
+make fleet-sessions S=service-a          # refused: psql к базе не проходит (наблюдалось при N=120)
 make set-active-max-connections SIZE=100 S=service-a
 ```
 
 После прогонов стенд возвращается в исходное состояние: `make clean && make up`. Ручные правки
 через `docker compose run ... etcdctl put` перекрывают значения сида, `etcdctl del <ключ>`
-возвращает дефолт. Ключи можно сбросить так:
+возвращает дефолт. Ключи конкретного инстанса сбрасываются по его пути (перечислить пути — `make config`):
 
 ```bash
-P=/config/pool-service/hikari
+P=/config/services/service-a/groups/group-1/instances/<hex>/hikari
 for k in maximumPoolSize minimumIdle maxPoolSize; do
   docker compose run --rm --no-deps etcdctl del "$P/$k"
 done

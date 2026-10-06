@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Живая сверка состава: у каждого инстанса канонического списка есть ряды в сборщике.
+"""Живая сверка состава: у каждого инстанса `docker compose ps` есть ряды в сборщике.
 
-Аргументы:
-  1) кортежи ETCD_INSTANCES через пробел: `service|group|instance|port`
-  2) адрес сборщика метрик (по умолчанию http://127.0.0.1:9090)
+Аргумент: адрес сборщика метрик (по умолчанию http://127.0.0.1:9090).
 
-Зачем это вместо сверки списка целей: цели сбора у сборщика больше нет — приложения отправляют
-метрики в точку приёма, а сборщик опрашивает только её. Поэтому «инстанс есть в .env» и «инстанс
-виден в наблюдении» сверяются напрямую: имя из канонического списка ищется в рядах сборщика.
+Перечень — `docker compose ps` (scripts/fleet.py), а не конфигурация: число реплик группы
+задаётся `--scale`, и состав объявляет сам compose. Сверка точечная, мгновенным запросом
+ряда состояния пула по каждому инстансу: у процесса ряд есть всегда (гейдж регистрируется
+в конструкторе и существует и при снятом пуле, отдавая ноль), поэтому отсутствие ряда
+означает «процесса нет в наблюдении», а не «конфигурации нет».
 
-Ненулевой код возврата означает расхождение поимённо: строки вида `service-a-group-1-1: рядов нет`.
-Отличать «нет рядов» от «инстанс ещё не успел отправить» нельзя — оба означают одно и то же для
-наблюдения, а сверить состав с готовностью стенда можно через `make pool`.
+Перечень значений признака для сверки не годится: он отдаёт всё, что сборщик видел за окно
+хранения, и остановившийся час назад инстанс в нём остаётся. Мгновенный запрос смотрит
+текущее состояние: ряд, пропавший из выдачи двери, сборщик помечает устаревшим на
+следующем опросе, и запрос его уже не отдаёт (на стенде от остановки инстанса до
+срабатывания сверки проходит около 40 секунд).
+
+Ненулевой код возврата — расхождение поимённо: строки вида `a1b2c3d4e5f6: рядов нет`.
+Отличать «нет рядов» от «инстанс ещё не успел отправить» нельзя — оба означают одно и то же
+для наблюдения.
 """
 import json
 import sys
@@ -19,27 +25,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-MARKER = "pool_config_state"
+from fleet import fleet
 
-
-def instances(tuples_text):
-    for t in tuples_text.split():
-        parts = t.split("|")
-        if len(parts) != 4 or not parts[2]:
-            print(f"пропущен битый кортеж: {t}", file=sys.stderr)
-            continue
-        yield parts[0], parts[1], parts[2]
+MARKER = "pool_maximum_pool_size"
 
 
 def collected_nodes(prom):
-    """Имена инстансов, чьи ряды есть в сборщике ПРЯМО СЕЙЧАС.
-
-    Именно мгновенный запрос, а не перечень значений признака: перечень меток отдаёт все ряды,
-    которые сборщик вообще видел за окно хранения, поэтому остановившийся час назад инстанс в нём
-    остаётся. Мгновенный запрос отдаёт ряды, у которых есть свежая точка (или метка устаревания),
-    и потому отвечает на вопрос «присылает ли этот инстанс метрики сейчас» — тот же вопрос, который
-    задаёт правило молчания, только без ожидания его окна.
-    """
+    """Множество имён инстансов, у которых сборщик видит ряд состояния пула; None — сборщик не ответил."""
     url = f"{prom}/api/v1/query?{urllib.parse.urlencode({'query': MARKER})}"
     try:
         with urllib.request.urlopen(url, timeout=15) as r:
@@ -47,34 +39,39 @@ def collected_nodes(prom):
     except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
         print(f"сборщик метрик не ответил ({prom}): {e}")
         return None
-    return {row["metric"]["node"] for row in rows if "node" in row["metric"]}
+    nodes = set()
+    for row in rows:
+        node = row.get("metric", {}).get("node")
+        if node:
+            nodes.add(node)
+    return nodes
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("usage: check-instances.py '<tuples>' [prom-url]", file=sys.stderr)
+    prom = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9090"
+
+    instances = fleet()
+    if not instances:
+        print("состав пуст: docker compose ps не показывает ни одного инстанса (стенд не поднят?)",
+              file=sys.stderr)
         return 2
-    prom = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:9090"
 
     nodes = collected_nodes(prom)
     if nodes is None:
         return 2
 
-    missing = []
-    total = 0
-    for service, group, instance in instances(sys.argv[1]):
-        total += 1
-        if instance not in nodes:
-            missing.append((service, group, instance))
+    missing = [(s, g, i) for s, g, i in instances if i not in nodes]
+    if not missing:
+        print(f"состав совпадает с наблюдением: {len(instances)} инстанс(ов), "
+              f"у каждого есть ряд {MARKER}")
+        return 0
 
+    print(f"нет рядов {MARKER} у {len(missing)} из {len(instances)} инстанс(ов):")
     for service, group, instance in missing:
-        print(f"нет рядов {MARKER}: {service}/{group}/{instance}")
-    print(f"инстансов в списке: {total}, без рядов в наблюдении: {len(missing)}")
-    if missing:
-        print("список инстансов и наблюдение разошлись; на стенде это либо остановленный "
-              "инстанс, либо недоступная точка приёма сигналов (make targets, make pool)")
-        return 1
-    return 0
+        print(f"  {instance} ({service}/{group})")
+    print("инстанс мог быть остановлен или не успел отправить метрики; "
+          "сверка по спискам: make pool")
+    return 1
 
 
 if __name__ == "__main__":

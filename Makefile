@@ -1,19 +1,27 @@
 SHELL := /bin/bash
 COMPOSE ?= docker compose
 
-# .env — канонический список инстансов и общие настройки; Makefile читает их отсюда.
+# .env — общие настройки и масштабы групп; Makefile читает их отсюда.
 -include .env
 
-# --- адресация инстансов ---
-# Кортежи ETCD_INSTANCES: service|group|instance|hostPort (через пробел).
-# Дефолт ниже — только на случай отсутствующего .env; фактический список берётся из .env.
-ETCD_INSTANCES ?= service-a|group-1|service-a-group-1-1|18081 service-a|group-1|service-a-group-1-2|18082 service-a|group-2|service-a-group-2-1|18083 service-a|group-2|service-a-group-2-2|18084 service-b|group-1|service-b-group-1-1|18085 service-b|group-1|service-b-group-1-2|18086 service-b|group-2|service-b-group-2-1|18087 service-b|group-2|service-b-group-2-2|18088
-TUPLES := $(subst ",,$(ETCD_INSTANCES))
+# --- состав флота ---
+# Число реплик группы задаётся через docker compose --scale из переменных ниже (дефолты на случай
+# отсутствующего .env, правятся в .env). Списка инстансов в конфигурации больше нет: что развёрнуто —
+# объявляет docker compose ps (make instances), а идентичность инстанса приходит из окружения
+# (HOSTNAME в контейнере = короткий ID, он же POOL_NAME и имя узла регистрации в etcd).
+A_G1 ?= 2
+A_G2 ?= 2
+B_G1 ?= 2
+B_G2 ?= 2
+FLEET_GROUPS = service-a-group-1 service-a-group-2 service-b-group-1 service-b-group-2
+REPLICAS = service-a-group-1=$(A_G1) service-a-group-2=$(A_G2) service-b-group-1=$(B_G1) service-b-group-2=$(B_G2)
+# аргументы --scale для docker compose up
+scale_args = $(foreach r,$(REPLICAS),--scale $(r))
 ETCD_ROOT ?= /config
 
 # --- параметры команд ---
 SIZE ?= 10
-I ?= service-a-group-1-1
+I ?=
 S ?=
 G ?=
 P ?=
@@ -33,7 +41,7 @@ LOKI_PORT ?= 3100
 WAIT_S ?= 120
 # Нагрузка адресуется сервисом, но отдельной переменной: S= обязателен в командах etcd (там
 # сервис выбирает, что править, и молчаливый выбор опасен), а дефолтный S= убрал бы эту проверку.
-LOAD_S ?= $(call tuple_service,$(word 1,$(TUPLES)))
+LOAD_S ?= service-a
 # Распределитель один, точек входа две: 80 отдаёт только LOAD_S, 81 — только второй сервис.
 # Порт назван здесь, а не в TARGET по умолчанию для нагрузчика: TARGET адресуется внутри сети
 # compose, где у контейнера lb свои номера, и путать их с портами хоста нельзя.
@@ -44,73 +52,53 @@ TARGET ?= http://$(LOAD_LB):$(LB_TARGET_PORT)
 
 # --- правила молчания инстанса ---
 # Список целей сбора удалён вместе с переходом на отправку: целей у сборщика теперь одна — точка
-# приёма, и молчание отдельного инстанса она не выражает. Вместо неё из того же ETCD_INSTANCES
-# выводится правило отсутствия ряда на каждый инстанс. Файл зафиксирован (сборщик поднимается и
-# без make), а make check-silence ловит расхождение.
+# приёма, и молчание отдельного инстанса она не выражает. Вместо неё из состава docker compose ps
+# выводится правило отсутствия ряда на каждый инстанс (scripts/silence.py). Файл зафиксирован
+# (сборщик поднимается и без make), а make check-silence ловит расхождение. Рядом лежит файл теста
+# правил — его тоже генерирует silence.py, а проверяет make test (promtool test rules).
 SILENCE_FILE ?= prometheus/rules/instances.yml
-# Список бэкендов распределителя выводится из ETCD_INSTANCES тем же способом, что и список целей
-# сбора, и проверяется той же командой в make test. Файл на стенд, а не на сервис: распределитель
-# один, и границу по сервису держит привязка маршрута к своей точке входа. Проверка заодно
-# сверяет, что каждая точка входа из списка есть в traefik/traefik.yml: несовпадение не даёт отказа,
-# а тихо оставляет точку входа без маршрута.
-BACKENDS_FILE ?= traefik/dynamic/fleet.yml
-# Временный файл сверки лежит ВНЕ каталога динамики: этот каталог смонтирован в балансировщик
-# целиком, и лишний файл в нём Traefik попытался бы прочитать как конфигурацию.
-BACKENDS_TMP ?= traefik/fleet.check
-
-# --- разбор кортежа s|g|i|port ---
-tuple_service  = $(word 1,$(subst |, ,$(1)))
-tuple_group    = $(word 2,$(subst |, ,$(1)))
-tuple_instance = $(word 3,$(subst |, ,$(1)))
-tuple_port     = $(word 4,$(subst |, ,$(1)))
-tuple_path     = $(ETCD_ROOT)/services/$(call tuple_service,$(1))/groups/$(call tuple_group,$(1))/instances/$(call tuple_instance,$(1))/hikari/
-
-# кортеж по имени инстанса (I=...)
-tuple_by_I = $(foreach t,$(TUPLES),$(if $(filter $(I),$(call tuple_instance,$(t))),$(t)))
-# имена сервисов без повторов: список сервисов тоже выводится, поэтому ни одна команда
-# не перечисляет его руками. Порядок — по имени, чтобы порядок кортежей в .env на него не влиял
-services = $(sort $(foreach t,$(1),$(call tuple_service,$(t))))
-# кортежи по сервису (S=...) / группе (G=...)
-tuples_by_S = $(foreach t,$(TUPLES),$(if $(filter $(S),$(call tuple_service,$(t))),$(t)))
-tuples_by_G = $(foreach t,$(TUPLES),$(if $(filter $(G),$(call tuple_group,$(t))),$(t)))
-# кортежи по сервису, заданному аргументом (для циклов по переменной-аргументу)
-tuples_by_serv = $(foreach t,$(TUPLES),$(if $(filter $(1),$(call tuple_service,$(t))),$(t)))
-
-# Список application_name пулов стенда в виде SQL IN ('a','b'): application_name = POOL_NAME,
-# и посторонние сессии (psql, нагрузчик) в сумму флота попадать не должны.
-pool_names_sql = $(subst $(space),$(comma),$(foreach t,$(TUPLES),'$(call tuple_instance,$(t))'))
-comma := ,
-space := $(empty) $(empty)
-
-# Имена сервисов: из S=... либо все сервисы .env по порядку первого появления. Кортежи в shell
-# кавычим: иначе `|` внутри кортежа разрежется в пайп и for развалится.
-service_names = $(if $(S),$(S),$(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++'))
-all_service_names = $(shell for t in $(foreach t,$(TUPLES),'$(t)'); do echo $${t%%|*}; done | awk '!seen[$$0]++')
+SILENCE_TEST_FILE ?= prometheus/rules/instances.test.yml
 
 # --- адресация базы данных по сервису ---
 # База на сервис, и имя контейнера выводится из имени сервиса: service-a -> postgres-a. Третьей
-# копии списка не появляется, как и с инстансами (выводится из ETCD_INSTANCES).
+# копии списка не появляется, как и с инстансами (состав выводится из docker compose ps).
 service_suffix = $(patsubst service-%,%,$(1))
 db_container   = postgres-$(call service_suffix,$(1))
 exporter_container = postgres-exporter-$(call service_suffix,$(1))
 loadgen_container  = loadgen-$(call service_suffix,$(1))
 
+# --- адресация инстанса в etcd ---
+# Имена инстансов приходят из окружения (короткий ID контейнера), поэтому ручные правки адресуются
+# живыми узлами регистрации: I=имя узла, а путь конфигурации выводится из снимка ключей etcd, а не
+# из перечня. require-I требует, чтобы узел с таким именем реально существовал, иначе путь не из
+# чего вывести (и опечатка молча попала бы не туда).
+path_of_I = $(shell $(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" --keys-only 2>/dev/null \
+	| grep -E "/instances/$(I)(/|$$)" | head -n1 | sed 's#/instances/$(I).*#/instances/$(I)/hikari/#')
+
 # Команды, работающие с базой, требуют S=...: баз несколько, и угадывать нечего. Молча смотренная
 # не та база опаснее падения — сводка «флот 100» из двух баз читалась бы как «флот 200 в одной».
 # Это отдельная цель-guard, а не $(if) внутри рецепта: пустой $(if) в shell даёт синтаксическую
-# ошибку вместо внятного отказа.
+# ошибку вместо внятного отказа. Список сервисов выводится из живых узлов регистрации (etcd).
 .PHONY: require-S
 require-S:
 	@if [ -z "$(S)" ]; then \
-		echo "укажи S=имя сервиса (база на сервис): $(call all_service_names)"; exit 1; \
+		echo "укажи S=имя сервиса (база на сервис; живые сервисы: make services)"; exit 1; \
 	fi; \
-	if ! echo " $(call all_service_names) " | grep -q " $(S) "; then \
-		echo "неизвестный сервис S=$(S) (в стенде: $(call all_service_names))"; exit 1; \
+	services=$$($(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+		| python3 scripts/services.py "$(ETCD_ROOT)/" | tr '\n' ' ') || exit 1; \
+	if ! echo " $$services " | grep -q " $(S) "; then \
+		echo "неизвестный сервис S=$(S) (по узлам регистрации: $$services)"; exit 1; \
 	fi
 
-# Кортежи выбранного сервиса — чтобы сводка по базе считала только его пулы, а не все сразу.
-tuples_of_S = $(call tuples_by_serv,$(S))
-pool_names_of_S = $(subst $(space),$(comma),$(foreach t,$(call tuples_of_S),'$(call tuple_instance,$(t))'))
+.PHONY: require-I
+require-I:
+	@if [ -z "$(I)" ]; then \
+		echo "укажи I=имя инстанса (живой состав: make instances)"; exit 1; \
+	fi
+	@if ! $(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" --keys-only 2>/dev/null \
+		| grep -qE "/instances/$(I)(/|$$)"; then \
+		echo "не найден инстанс I=$(I) в узлах регистрации (живой состав: make instances)"; exit 1; \
+	fi
 
 # Проверка аргумента SIZE до записи в etcd: не число или не положительное — отказ.
 require_positive_int = $(if $(filter-out 0,$(shell test $(2) -gt 0 2>/dev/null && echo ok)),,\
@@ -139,15 +127,26 @@ help: ## список целей
 build: ## собрать образы сервиса, провизора, нагрузчика и etcdctl
 	$(COMPOSE) build
 
+.PHONY: services
+services: ## живые сервисы по узлам регистрации etcd
+	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+		| python3 scripts/services.py "$(ETCD_ROOT)/"
+
 .PHONY: instances
-instances: ## расклад инстансов: имя, порт, путь конфигурации
-	@$(foreach t,$(TUPLES),printf "%-28s %-6s %s\n" "$(call tuple_instance,$(t))" "$(call tuple_port,$(t))" "$(call tuple_path,$(t))";)
+instances: ## расклад инстансов: service|group|instance из docker compose ps + путь конфигурации
+	@python3 scripts/fleet.py | awk -F'|' '{printf "%-14s %-16s %s\n", $$3, $$1"/"$$2, "$(ETCD_ROOT)/services/"$$1"/groups/"$$2"/instances/"$$3"/hikari/"}'
 
 .PHONY: up
-up: silence-rules balancers ## поднять весь стенд и дождаться готовности всех инстансов и распределителей
-	$(COMPOSE) up -d --build
+up: ## поднять весь стенд (реплики групп из A_G1/A_G2/B_G1/B_G2) и дождаться готовности
+	$(COMPOSE) up -d --build $(call scale_args)
+	@# Правила молчания генерируются ПОСЛЕ поднятия: их состав объявляет docker compose ps, и на
+	@# пустом стенде генерировать нечего. Перезагрузка правил без рестарта сборщика — SIGHUP
+	@# (/-/reload, --web.enable-lifecycle в compose): недоступный сборщик не роняет подъём.
+	@$(MAKE) --no-print-directory silence-rules
+	-@curl -fsS -X POST "http://localhost:$(PROM_PORT)/-/reload" >/dev/null 2>&1 \
+		|| echo "не перечитал правила сборщик (ещё не поднялся?) — прочитает при старте"
 	@echo "--- ждём готовности всех инстансов и распределителя (до $(WAIT_S)с) ---"
-	@./scripts/wait-ready.sh "$(TUPLES)" $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
+	@./scripts/wait-ready.sh $(LB_A_PORT) $(LB_B_PORT) $(WAIT_S) \
 		$(PROM_PORT) $(GRAFANA_PORT) $(EXPORTER_PORT_A) $(EXPORTER_PORT_B) \
 		$(OTEL_METRICS_PORT) $(TEMPO_PORT) $(LOKI_PORT)
 	@$(MAKE) --no-print-directory pool
@@ -156,20 +155,21 @@ up: silence-rules balancers ## поднять весь стенд и дожда�
 	-@$(MAKE) --no-print-directory targets
 
 .PHONY: down
-down: ## остановить стенд (с данными)
-	$(COMPOSE) down
+down: ## остановить стенд (с данными); --remove-orphans: контейнеры, выведенные из состава, тоже снимаются
+	$(COMPOSE) down --remove-orphans
 
 .PHONY: clean
 clean: ## остановить стенд и удалить тома с данными
-	$(COMPOSE) down -v
+	$(COMPOSE) down -v --remove-orphans
 
 .PHONY: ps
 ps: ## состояние контейнеров
 	$(COMPOSE) ps
 
 .PHONY: logs
-logs: ## логи инстанса: make logs P=service-a-group-1-1
-	$(COMPOSE) logs -f --tail=200 $(P)
+logs: ## логи: make logs P=<имя контейнера> (hex-ID инстанса или имя контейнера compose)
+	@test -n "$(P)" || { echo "укажи P=hex-ID инстанса (make instances)"; exit 1; }
+	docker logs -f --tail=200 $(P)
 
 .PHONY: load-logs
 load-logs: ## логи нагрузчика сервиса: make load-logs LOAD_S=service-b
@@ -185,7 +185,7 @@ stress: ## разовый прогон нагрузки на сервис (DURAT
 		$(call loadgen_container,$(LOAD_S))
 
 # --- ручные правки конфигурации в etcd ---
-# Адресация: I=имя инстанса (один), S=имя сервиса, G=имя группы.
+# Адресация: I=имя инстанса (hex-ID контейнера, один), S=имя сервиса, G=имя группы.
 # Размер пула задаётся бюджетом сервиса (set-active-max-connections): провижёр делит его между
 # живыми инстансами активных групп, а группы с флагом неактивности (set-group-active ACTIVE=false,
 # глобальный флот {root}/groups/) сжимаются до резерва set-inactive-max-connections.
@@ -238,43 +238,49 @@ set-group-active: ## флаг активности группы (глобаль�
 	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-size
-set-size: ## РАЗМЕР ПУЛА ОВЕРРАЙДОМ: make set-size SIZE=25 [I=имя] — живёт до пересчёта бюджета
-	@$(if $(call tuple_by_I,$(I)),,@echo "не найден инстанс I=$(I)"; exit 1)
-	@echo "etcd: $(call tuple_path,$(call tuple_by_I,$(I)))maximumPoolSize = $(SIZE)"
-	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(call tuple_by_I,$(I)))maximumPoolSize" "$(SIZE)"
+set-size: require-I ## РАЗМЕР ПУЛА ОВЕРРАЙДОМ: make set-size SIZE=25 I=<hex> — живёт до пересчёта бюджета
+	@echo "etcd: $(call path_of_I)maximumPoolSize = $(SIZE)"
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call path_of_I)maximumPoolSize" "$(SIZE)"
 	@sleep 1
-	@$(MAKE) --no-print-directory pool I=$(I)
+	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-service-size
-set-service-size: ## оверрайд размера всех инстансов сервиса: SIZE=25 S=service-a — живёт до пересчёта
-	@$(if $(S),,@echo "укажи S=имя сервиса"; exit 1)
-	@$(foreach t,$(call tuples_by_S),$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(t))maximumPoolSize" "$(SIZE)";)
+set-service-size: require-S ## оверрайд размера всех провиженных инстансов сервиса: SIZE=25 S=service-a — живёт до пересчёта
+	@paths=$$($(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/$(S)/" --keys-only \
+		| sed -n 's#\(.*/instances/[^/]*\)/hikari/.*#\1/hikari/#p' | sort -u); \
+	if [ -z "$$paths" ]; then echo "нет провиженных инстансов сервиса $(S) (make registrations, make instances)"; exit 1; fi; \
+	for p in $$paths; do \
+		$(COMPOSE) run --rm --no-deps etcdctl put "$${p}maximumPoolSize" "$(SIZE)"; \
+	done
 	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-group-size
-set-group-size: ## оверрайд размера всех инстансов группы: SIZE=25 G=group-1 — живёт до пересчёта
-	@$(if $(G),,@echo "укажи G=имя группа"; exit 1)
-	@$(foreach t,$(call tuples_by_G),$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(t))maximumPoolSize" "$(SIZE)";)
+set-group-size: ## оверрайд размера всех провиженных инстансов группы: SIZE=25 G=group-1 — живёт до пересчёта
+	@$(if $(G),,@echo "укажи G=имя группы"; exit 1)
+	@paths=$$($(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" --keys-only \
+		| grep "/groups/$(G)/instances/" | sed -n 's#\(.*/instances/[^/]*\)/hikari/.*#\1/hikari/#p' | sort -u); \
+	if [ -z "$$paths" ]; then echo "нет провиженных инстансов группы $(G) (make registrations, make instances)"; exit 1; fi; \
+	for p in $$paths; do \
+		$(COMPOSE) run --rm --no-deps etcdctl put "$${p}maximumPoolSize" "$(SIZE)"; \
+	done
 	@$(MAKE) --no-print-directory pool
 
 .PHONY: set-min-idle
-set-min-idle: ## зафиксировать minimumIdle инстанса: make set-min-idle SIZE=3 [I=имя]
-	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call tuple_path,$(call tuple_by_I,$(I)))minimumIdle" "$(SIZE)"
+set-min-idle: require-I ## зафиксировать minimumIdle инстанса: make set-min-idle SIZE=3 I=<hex>
+	@$(COMPOSE) run --rm --no-deps etcdctl put "$(call path_of_I)minimumIdle" "$(SIZE)"
 
 .PHONY: unset-min-idle
-unset-min-idle: ## убрать minimumIdle инстанса (снова follow за maximumPoolSize): [I=имя]
-	@$(COMPOSE) run --rm --no-deps etcdctl del "$(call tuple_path,$(call tuple_by_I,$(I)))minimumIdle"
+unset-min-idle: require-I ## убрать minimumIdle инстанса (снова follow за maximumPoolSize): I=<hex>
+	@$(COMPOSE) run --rm --no-deps etcdctl del "$(call path_of_I)minimumIdle"
 
 .PHONY: config
-config: ## ключи инстанса из etcd: make config [I=имя]
-	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(call tuple_path,$(call tuple_by_I,$(I)))"
+config: require-I ## ключи инстанса из etcd: make config I=<hex>
+	@$(COMPOSE) run --rm --no-deps etcdctl get --prefix "$(call path_of_I)"
 
 .PHONY: budget
 budget: ## бюджет сервисов: N, m, R, маркеры групп, живые инстансы, сумма долей (make budget [S=сервис])
-	@$(foreach s,$(call service_names),\
-		printf "== %s ==\n" "$(s)"; \
-		$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/" -w json \
-			| python3 scripts/budget.py '$(call tuples_by_serv,$(s))' "$(ETCD_ROOT)/"; )
+	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/" -w json \
+		| python3 scripts/budget.py "$(ETCD_ROOT)/" "$(S)"
 
 .PHONY: registrations
 registrations: ## узлы регистрации инстансов в etcd: создаются при старте, исчезают при остановке
@@ -289,7 +295,7 @@ leader: ## кто ведёт каждый сервис (лидер выборо�
 .PHONY: pool
 pool: ## сводка по всем инстансам: готовность, пул из метрик, путь конфигурации и ключи в etcd
 	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
-		| python3 scripts/pool-all.py '$(TUPLES)' '$(ETCD_ROOT)/' 'http://127.0.0.1:$(PROM_PORT)'
+		| python3 scripts/pool-all.py "$(ETCD_ROOT)/" 'http://127.0.0.1:$(PROM_PORT)'
 
 .PHONY: work
 work: ## один запрос через балансировщик сервиса: make work LOAD_S=service-b
@@ -309,64 +315,44 @@ sessions: require-S ## сессии базы сервиса по application_nam
 
 .PHONY: fleet-sessions
 fleet-sessions: require-S ## держит ли флот бюджет: make fleet-sessions S=service-a — сводка по его базе
-	@printf "== фактически держит флот (база %s, сервис %s) ==\n" "$(call db_container,$(S))" "$(S)"
-	@$(COMPOSE) exec -T $(call db_container,$(S)) psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
-		-c "SELECT sum(sessions) AS held_by_fleet, count(*) AS pools FROM pool_sessions \
-			WHERE application_name IN ($(call pool_names_of_S))"
+	@nodes=$$($(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
+		| python3 scripts/reg-nodes.py "$(ETCD_ROOT)/" "$(S)"); \
+	if [ -z "$$nodes" ]; then echo "нет зарегистрированных узлов сервиса $(S) (etcd недоступен?)"; exit 1; fi; \
+	inlist=$$(printf '%s\n' "$$nodes" | awk '{printf "\x27%s\x27\n", $$0}' | paste -sd, -); \
+	printf "== фактически держит флот (база %s, сервис %s) ==\n" "$(call db_container,$(S))" "$(S)"; \
+	$(COMPOSE) exec -T $(call db_container,$(S)) psql -U $${POSTGRES_USER:-app} -d $${POSTGRES_DB:-demo} \
+		-c "SELECT sum(sessions) AS held_by_fleet, count(*) AS pools FROM pool_sessions WHERE application_name = ANY (ARRAY[$$inlist])"
 	@printf "== потолки и публикации (etcd) ==\n"
 	@$(COMPOSE) run --rm --no-deps -T etcdctl get --prefix "$(ETCD_ROOT)/services/" -w json \
 		| python3 scripts/fleet-sessions.py "$(ETCD_ROOT)/" "$(S)"
 
 .PHONY: service-restart
-service-restart: ## перезапустить инстанс: make service-restart P=service-a-group-1-1
-	$(COMPOSE) restart $(P)
+service-restart: ## перезапустить инстанс: make service-restart P=<hex-ID> (или имя контейнера compose)
+	@test -n "$(P)" || { echo "укажи P=hex-ID инстанса (make instances)"; exit 1; }
+	docker restart $(P)
 
 .PHONY: silence-rules
-silence-rules: ## перегенерировать правила молчания инстанса из ETCD_INSTANCES
+silence-rules: ## перегенерировать правила молчания инстанса из состава docker compose ps
 	@mkdir -p $(dir $(SILENCE_FILE))
-	@python3 scripts/silence.py '$(TUPLES)' '$(SILENCE_FILE)'
-	@echo "правила молчания: $(words $(TUPLES)) инстанс(ов) -> $(SILENCE_FILE)"
+	@python3 scripts/silence.py '$(SILENCE_FILE)' '$(SILENCE_TEST_FILE)'
+	@echo "правила молчания -> $(SILENCE_FILE), $(SILENCE_TEST_FILE)"
 
 .PHONY: check-silence
-check-silence: ## сверить зафиксированные правила молчания с ETCD_INSTANCES (входит в make test)
+check-silence: ## сверить зафиксированные правила молчания с составом docker compose ps (входит в make test)
 	@mkdir -p $(dir $(SILENCE_FILE))
-	@python3 scripts/silence.py '$(TUPLES)' '$(SILENCE_FILE).tmp'
-	@if diff -u '$(SILENCE_FILE)' '$(SILENCE_FILE).tmp' > /tmp/silence.diff; then \
-		rm -f '$(SILENCE_FILE).tmp'; \
-		echo "правила молчания совпадают с ETCD_INSTANCES ($(words $(TUPLES)))"; \
+	@python3 scripts/silence.py '/tmp/instances.silence.yml' '/tmp/instances.test.silence.yml'
+	@if diff -u '$(SILENCE_FILE)' '/tmp/instances.silence.yml' > /tmp/silence.diff && \
+		diff -u '$(SILENCE_TEST_FILE)' '/tmp/instances.test.silence.yml' > /tmp/silence-test.diff; then \
+		rm -f '/tmp/instances.silence.yml' '/tmp/instances.test.silence.yml'; \
+		echo "правила молчания совпадают с составом docker compose ps"; \
 	else \
-		echo "правила молчания разошлись с ETCD_INSTANCES:"; cat /tmp/silence.diff; \
-		echo "перегенерируй: make silence-rules"; rm -f '$(SILENCE_FILE).tmp'; exit 1; \
+		echo "правила молчания разошлись с составом:"; cat /tmp/silence.diff /tmp/silence-test.diff; \
+		echo "перегенерируй: make silence-rules"; rm -f '/tmp/instances.silence.yml' '/tmp/instances.test.silence.yml'; exit 1; \
 	fi
 
 .PHONY: check-instances
-check-instances: ## живая сверка состава: у каждого инстанса списка есть ряды в сборщике
-	@python3 scripts/check-instances.py '$(TUPLES)' 'http://127.0.0.1:$(PROM_PORT)'
-
-.PHONY: balancers
-balancers: ## перегенерировать список бэкендов распределителя из ETCD_INSTANCES
-	@mkdir -p $(dir $(BACKENDS_FILE))
-	@python3 scripts/balancers.py '$(TUPLES)' '$(BACKENDS_FILE)'
-	@echo "бэкенды распределителя: $(words $(TUPLES)) инстанс(ов), $(words $(call services,$(TUPLES))) сервис(ов) -> $(BACKENDS_FILE)"
-
-.PHONY: check-balancers
-check-balancers: ## сверить зафиксированный список бэкендов с ETCD_INSTANCES (входит в make test)
-	@mkdir -p $(dir $(BACKENDS_FILE)) $(dir $(BACKENDS_TMP))
-	@python3 scripts/balancers.py '$(TUPLES)' '$(BACKENDS_TMP)'
-	@if diff -u '$(BACKENDS_FILE)' '$(BACKENDS_TMP)' > /tmp/balancers.diff; then \
-		rm -f '$(BACKENDS_TMP)'; \
-	else \
-		echo "список бэкендов разошёлся с ETCD_INSTANCES:"; cat /tmp/balancers.diff; \
-		echo "перегенерируй: make balancers"; rm -f '$(BACKENDS_TMP)'; exit 1; \
-	fi
-	@# каждая точка входа из списка обязана быть объявлена в статической конфигурации: иначе
-	@# Traefik не создаст маршрут, и точка входа будет отдавать 404 без всякой ошибки
-	@for ep in $$(grep -oE '\- web-[a-z0-9]+' '$(BACKENDS_FILE)' | grep -oE 'web-[a-z0-9]+' | sort -u); do \
-		grep -q "^  $$ep:" traefik/traefik.yml || \
-			{ echo "точка входа $$ep есть в списке бэкендов, но не объявлена в traefik/traefik.yml"; \
-			  exit 1; }; \
-	done
-	@echo "список бэкендов совпадает с ETCD_INSTANCES ($(words $(TUPLES)) инстанс(ов))"
+check-instances: ## живая сверка состава: у каждого инстанса docker compose ps есть ряды в сборщике
+	@python3 scripts/check-instances.py 'http://127.0.0.1:$(PROM_PORT)'
 
 .PHONY: targets
 targets: ## состояние целей сбора метрик (нужен поднятый сборщик)
@@ -384,11 +370,11 @@ door-config: ## проверить конфигурацию двери сигн�
 		validate --config=/etc/otel/collector.yaml
 
 .PHONY: test
-test: ## юнит-тесты сервиса и провизора, проверка целей сбора, конфигурации и правил
+test: ## юнит-тесты сервиса и провизора, проверка правил, конфигурации и состава (нужен поднятый стенд)
 	cd service && mvn -B -q test
 	cd provisioner && mvn -B -q test
 	@$(MAKE) --no-print-directory check-silence
-	@$(MAKE) --no-print-directory check-balancers
+	@$(MAKE) --no-print-directory check-instances
 	@$(MAKE) --no-print-directory door-config
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
 	$(COMPOSE) run --rm --no-deps -T --entrypoint promtool prometheus check rules /etc/prometheus/rules/stand.yml

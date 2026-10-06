@@ -10,7 +10,8 @@
 | `maven` | только `make test`; образ сервиса собирает maven внутри себя | нет |
 
 Отсутствие `python3` — самая частая причина, почему `make up` падает на последнем шаге, когда
-стенд уже поднят. Обойти можно, спросив инстанс напрямую: `curl -s localhost:18081/actuator/health/readiness`.
+стенд уже поднят. Обойти можно, спросив точку входа напрямую: у инстанса нет хост-порта, наружу
+флот отдаёт только балансировщик — `curl -s localhost:8080/actuator/prometheus | grep -m1 pool_config_state{`.
 
 ## Troubleshooting
 
@@ -22,10 +23,11 @@
 получена»:
 
 ```bash
-make instances                    # правильный ли путь у каждого инстанса
+make instances                    # правильный ли путь у каждого инстанса (вывод из docker compose ps)
 docker compose ps                 # все ли сервисные контейнеры живы
 docker compose logs config-provisioner-1 config-provisioner-2   # обеспечил ли провизор ключи зарегистрированных узлов
-make pool I=service-a-group-1-1   # ready, path, notReadyReason конкретного инстанса
+make pool                         # ready, path, ключи по всем инстансам сразу
+make config I=<hex>               # ключи конфигурации одного инстанса
 ```
 
 Инстансы от провизора не зависят (`depends_on` нет): провизор нагоняет конфигурацию сам, по
@@ -51,7 +53,7 @@ etcd лежит до первого применения конфигураци�
 
 ```bash
 docker compose ps etcd
-docker compose logs --tail=50 service-a-group-1-1   # "etcd недоступен/ошибка watch (...) повтор через ..."
+docker logs --tail=50 <hex-ID>                       # "etcd недоступен/ошибка watch (...) повтор через ..."
 ```
 
 ### Ключи инстанса исчезли из etcd (конфиг сброшен)
@@ -59,7 +61,7 @@ docker compose logs --tail=50 service-a-group-1-1   # "etcd недоступен
 Это работа провизора (GC): префикс `hikari/` живёт, пока жив узел регистрации инстанса **и** узел
 получает долю бюджета.
 
-- Инстанс остановлен (`docker compose stop <i>`) или упал — провизор удалил весь его путь (включая
+- Инстанс остановлен (`docker stop <hex>`) или упал — провизор удалил весь его путь (включая
   ручные правки); при следующем старте инстанс получит долю бюджета заново.
 - Инстанс выпал из активного распределения: бюджет не тянет состав на минимум
   (`n_акт × m > activeMaxConnections − R×k`), и этому активному узлу не досталась доля.
@@ -108,7 +110,7 @@ docker compose logs --tail=50 service-a-group-1-1   # "etcd недоступен
 
 ### `minimumIdle` больше, чем `total`
 
-`make pool I=…` показывает `minimumIdle=25` при `total=4`, и пул добирается медленно. Обычно это
+`make pool` показывает `minimumIdle=25` при `total=4` по инстансу, и пул добирается медленно. Обычно это
 значит, что недавно было сжатие **под нагрузкой**: соединения, занятые запросами, помечены к
 вытеснению и закрываются при возврате, а новые открывает HouseKeeper небольшими порциями раз в
 ~30с. Добор занимает минуту-две, в неё флот держит меньше бюджета — это недобор, а не превышение.
@@ -131,7 +133,7 @@ docker compose logs --tail=50 service-a-group-1-1   # "etcd недоступен
 
 ```bash
 make registrations                 # живые узлы и аренды
-docker compose logs --tail=30 service-a-group-1-1   # «освобождаем соединения перед остановкой»
+docker logs --tail=30 <hex-ID>     # «освобождаем соединения перед остановкой»
 ```
 
 | симптом | что означает |
@@ -169,7 +171,9 @@ docker compose logs --tail=30 service-a-group-1-1   # «освобождаем �
 источника не роняет вывод: без сборщика числа пула печатаются как `?`, без снимка etcd колонка
 ключей — как `н/д`, готовность и путь остаются. Отдельного «детально один инстанс» больше нет:
 сводка печатает все строки, а по одному инстансу смотрят его метрики
-(`curl -s localhost:18081/actuator/prometheus | grep '^pool_'`).
+(`curl -s <container-IP>:8080/actuator/prometheus | grep '^pool_'`, адрес — из
+`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}' <hex>` — это не хост-порт,
+портов у инстансов нет).
 
 ### В логах `конфиг отклонён (...), остаёмся на предыдущих значениях`
 
@@ -195,7 +199,7 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 применённом конфиге — проверьте, что `pool_connections_open` ненулевой, клиенты не должны падать.
 Причина обрыва и текст отказа (`TimeoutException` на недоступный etcd, `EtcdException` при обрыве
 соединения, `rejected: ...` при отказе конфигурации) — в журнале инстанса:
-`docker compose logs service-a-group-1-1`.
+`docker logs --tail=50 <hex-ID>`.
 
 Две тонкости по времени: первые ~2 секунды после падения etcd флаг ещё `true` (обрыв приходит
 асинхронно), а после подъёма восстановление занимает до ~8 секунд из-за backoff'а.
@@ -203,7 +207,7 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 ### Нагрузчик показывает растущий `err`, хотя сервис живой
 
 Почти всегда это накопленные ошибки от перезапуска сервиса вручную
-(`docker compose up --force-recreate service-a-group-1-1`): нагрузчик продолжает долбить, пока
+(`docker restart <hex-ID>`): нагрузчик продолжает долбить, пока
 сеть переподнимается, и получает connection refused. На чистом прогоне `err=0`. Различить можно
 по времени: реальные ошибки из-за насыщения пула растут только под нагрузкой и сопровождаются
 `waiting > 0`. Балансировщик часть таких окон гасит сам: неготовый инстанс уходит из ротации по
@@ -227,9 +231,11 @@ etcd недоступен, watch докарачивается с backoff'ом. �
 ```bash
 sed -i 's/^POOL_CONNECTION_TIMEOUT_MS=.*/POOL_CONNECTION_TIMEOUT_MS=1000/' .env
 docker compose up -d
-# 40 параллельных запросов длиннее таймаута на пул из 25
+# 40 параллельных запросов длиннее таймаута на пул из 25; по хост-порту инстанса нет,
+# цель — IP контейнера внутри compose-сети (с хоста он достижим)
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <hex-ID>)
 ( for n in $(seq 1 40); do curl -s -o /dev/null -w '%{http_code}\n' \
-    "localhost:18081/api/work?ms=2000" & done; wait ) | sort | uniq -c
+    "http://$IP:8080/api/work?ms=2000" & done; wait ) | sort | uniq -c
 # вернуть
 sed -i 's/^POOL_CONNECTION_TIMEOUT_MS=.*/POOL_CONNECTION_TIMEOUT_MS=30000/' .env
 docker compose up -d
@@ -238,29 +244,28 @@ docker compose up -d
 Проверено: 25 ответов `200` (пул занят до 2с) и 15 ответов `503` с `durationMs=1003` при таймауте
 1000 мс. С дефолтом 30000 та же картина, но клиент ждёт дольше и отказов меньше.
 
-### Балансировщик отдаёт 404 или обслуживает чужой сервис
+### Балансировщик отдаёт 404 или не обслуживает инстансы
 
-`404` на `:8080`/`:8081` — маршрута для точки входа нет: имя точки входа в
-`traefik/dynamic/fleet.yml` не совпадает с объявленным в `traefik/traefik.yml`. Расхождение ловится
-`make check-balancers` (входит в `make test`). Состав сервиса под точкой входа видно так:
+`404` на `:8080`/`:8081` — у точки входа нет маршрута к флоту. Маршруты генерирует
+**docker-провайдер** из меток Traefik на общих блоках сервисов (`x-service-a`/`x-service-b` в
+`docker-compose.yml`): роутер `fleet-<service>` на entrypoint `web-a`/`web-b`, сервис на 8080 и
+healthcheck `/actuator/health/readiness` с периодом 1с. Метки одинаковы у всех реплик группы —
+это намеренно: Traefik дедуплицирует их в один роутер, конфликтов в журнале нет, а новый инстанс
+(scale up) подхватывается без рестарта. Состав сервиса под точкой входа видно так:
 
     curl -s localhost:8080/actuator/prometheus | grep -m1 pool_config_state{   # node="…" в ответе
 
-Если правка `fleet.yml` не влияет на поведение, а `/ping` балансировщика зелёный, проверьте, что
-смонтирован **каталог**, а не файл: при смонтированном файле Traefik не перечитывает конфигурацию
-никогда (события файловой системы внутрь контейнера по файловому bind-mount не доходят), и список
-бэкендов устаревает молча.
-
-    docker inspect hikari-etcd-stand-lb-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
-
-Штатное применение перегенерации — без перезапуска: `make balancers`, и через пару секунд Traefik
-перечитывает файл. Если этого не произошло, смотрите `docker compose logs lb`.
+Если правка меток не влияет на поведение, а `/ping` балансировщика зелёный, проверьте, что
+docker-провайдер включён и видит docker.sock (`traefik/traefik.yml`, `providers.docker`,
+монтирование `docker.sock` read-only в `docker-compose.yml`) и что у реплик совпадают метки:
+`docker inspect <hex> --format '{{index .Config.Labels "traefik.http.routers.fleet-service-a.rule"}}'`.
+Смотреть динамическую конфигурацию: `docker compose logs lb`.
 
 ### Не могу запустить на порту 8080 / 5432 / 2379
 
 Порты балансировщика (`LB_A_PORT`/`LB_B_PORT`) и инфраструктуры настраиваются в `.env`.
-Порты инстансов 18081–18088 привязаны к кортежам `ETCD_INSTANCES` — менять их нужно синхронно с
-`docker-compose.yml` (см. «Про ETCD_INSTANCES» ниже).
+Портов у инстансов на хосте нет вовсе: реплики не публикуются наружу, наружу флот отдаёт только
+балансировщик, и у инстанса нет ни имени, ни порта, которые можно было бы зафиксировать.
 Базы на сервисы заняли `POSTGRES_PORT_A`/`POSTGRES_PORT_B` (5432/5433), сборщики метрик баз —
 `EXPORTER_PORT_A`/`EXPORTER_PORT_B` (9187/9188). Перенести базу на занятый порт нельзя, поменять
 порт — можно: переменные в `.env`, потом `make up`.
@@ -268,8 +273,10 @@ docker compose up -d
 ## Переменные окружения
 
 Берутся из `.env` (скопируйте `.env.example`), у всех есть дефолты в `docker-compose.yml`
-и в `Makefile`. Ключевой момент: **канонический список инстансов живёт в `.env`
-(`ETCD_INSTANCES`), его читают compose и Makefile** — не дублируйте его в Makefile руками.
+и в `Makefile`. Ключевой момент: **списка инстансов в конфигурации нет** — состав задаётся числом
+реплик четырёх групп (`A_G1`/`A_G2`/`B_G1`/`B_G2`), инстанс называет себя сам из окружения
+(см. «сервисы (по инстансу)» ниже), а перечень развёрнутого — `docker compose ps`. Не заводите
+вторую копию состава: она разъедется с фактом (см. «Состав стенда — масштабированием» ниже).
 
 ### etcd
 
@@ -277,7 +284,7 @@ docker compose up -d
 |---|---|---|
 | `ETCD_PORT` / `ETCD_PEER_PORT` | `2379` / `2380` | порты на хосте |
 | `ETCD_ROOT` | `/config` | корень ключей; путь инстанса: `{root}/services/{service}/groups/{group}/instances/{instance}/hikari/` |
-| `ETCD_INSTANCES` | 8 кортежей `service\|group\|instance\|hostPort` | канонический список инстансов (см. ниже) |
+| `A_G1` / `A_G2` / `B_G1` / `B_G2` | `2` / `2` / `2` / `2` | число реплик групп `service-a`/`service-b` (см. ниже) |
 
 ### базы данных
 
@@ -346,14 +353,17 @@ docker compose up -d
 
 ### сервисы (по инстансу)
 
-Каждый инстанс получает свои сегменты пути. Фолбэки — «как в кубах»: `POD_NAMESPACE`/`POD_NAME`.
+Каждый инстанс получает свои сегменты пути. Идентичность приходит из окружения, а не из списка:
+цепочки дефолтов в `application.yml` — «явное значение > имя пода > имя хоста» (в docker контейнер
+без явного имени хоста видит `HOSTNAME` = короткий ID контейнера, и это и есть имя узла
+регистрации и `POOL_NAME` пула).
 
 | переменная | дефолт | примечание |
 |---|---|---|
 | `SERVICE_NAME` | `spring.application.name` (`pool-service`) | сегмент `service` |
-| `ETCD_GROUP` | `POD_NAMESPACE` | сегмент `group`, обязателен при `ETCD_ENABLED=true` |
-| `ETCD_INSTANCE` | `POD_NAME` | сегмент `instance`, обязателен при `ETCD_ENABLED=true` |
-| `POOL_NAME` | `POOL_NAME` | `application_name` в postgres; в стенде = имя инстанса, иначе `pool_sessions` склеит пулы |
+| `ETCD_GROUP` | `POD_NAMESPACE` | сегмент `group`, обязателен при `ETCD_ENABLED=true`; в стенде задан явно в блоке группы (`group-1`/`group-2`) |
+| `ETCD_INSTANCE` | `POD_NAME`, затем `HOSTNAME` | сегмент `instance`, обязателен при `ETCD_ENABLED=true`; в стенде не задаётся — берётся `HOSTNAME` (hex-ID контейнера) |
+| `POOL_NAME` | имя инстанса (`pool.etcd.instance`) | `application_name` в postgres; должен быть уникален на стенд, иначе `pool_sessions` склеит пулы |
 | `POOL_EAGER_FILL` | `true` | добивать пул сразу после расширения (в проде обычно `false`) |
 | `POOL_DRAIN_TIMEOUT` | `3s` | сколько ждать активные соединения при пересоздании/закрытии пула |
 
@@ -362,8 +372,7 @@ env-переменной `POOL_MAX_SIZE` не существует). Пул по
 первый принятый снимок создаёт его на своей доле, целевой ноль (инстанс без доли, холодный флот
 `R=0`) закрывает его с дренажом.
 
-Порты инстансов на хосте 18081–18088 заданы статически в `docker-compose.yml`; последний элемент
-каждого кортежа `ETCD_INSTANCES` обязан совпадать с соответствующим `ports:` блока.
+Хост-портов у инстансов нет: реплики не публикуются наружу, наружу флот отдаёт балансировщик.
 
 ### балансировщик
 
@@ -382,26 +391,33 @@ env-переменной `POOL_MAX_SIZE` не существует). Пул по
 | `REPORT_MS` | `2000` | период отчёта |
 | `DURATION_S` | `0` | `0` = крутится до `docker compose stop loadgen-a loadgen-b` |
 
-Точек нагрузки две — по одной на сервис: `loadgen-a` долбит `lb:80` (точка `web-a`) и берёт сводку
-у `service-a-group-1-1`, `loadgen-b` — `lb:81` (точка `web-b`) и `service-b-group-1-1`. Своя точка
-на каждый сервис,
+Точек нагрузки две — по одной на сервис: `loadgen-a` долбит `lb:80` (точка `web-a`),
+`loadgen-b` — `lb:81` (точка `web-b`). Своя точка на каждый сервис,
 а не список целей в одной, намеренно: у каждой своя гистограмма задержек, и отчёты двух прогонов
 не смешивают две базы. `make stress` гоняет одну точку на сервис, адресуемую `LOAD_S=` (по
 умолчанию первый сервис `.env`), `make load-logs LOAD_S=service-b` — её журнал. Переменная отдельная,
 а не `S=`: в командах etcd сервис обязателен по существу (выбирает, что править), и молчаливый
 выбор там опасен.
 
-### Важно про `ETCD_INSTANCES`
+### Состав стенда — масштабированием
 
-Список задаётся **один раз** в `.env` и подхватывается оттуда compose (через `$ETCD_INSTANCES`) и
-Makefile (`-include .env`). Фолбэк-дефолт продублирован в `docker-compose.yml` и `Makefile` на
-случай отсутствующего `.env` — не редактируйте его, правит `.env`.
+Списка инстансов в конфигурации нет и это осознанно: `ETCD_INSTANCES` был второй копией состава,
+которая молча разъезжалась с фактом (уехавший из списка выглядел бы как «ещё не поднят»,
+добавленный в `.env` без compose — как «неизвестный»). Теперь:
 
-Расхождение между кортежами и блоками `service-*` в `docker-compose.yml` видно, а не молчаливо:
-`make instances` печатает фактический расклад (имя, порт, путь) по каждому инстансу, а
-`make pool` показывает, кто реально отвечает. Расклад «правильное место»: Makefile адресуется по
-`ETCD_INSTANCES`, сервисы адресуются по сегментам `SERVICE_NAME`/`ETCD_GROUP`/`ETCD_INSTANCE`,
-провизору список не нужен вовсе — он пишет ключи в путь любого зарегистрированного узла.
+- число реплик группы задаёт `make up` (`--scale service-a-group-1=$(A_G1) …`, дефолты по 2 в
+  `.env`), а масштабирование вручную — полным набором:
+  `docker compose up -d --scale service-a-group-1=3 --scale service-a-group-2=2 --scale service-b-group-1=2 --scale service-b-group-2=2`
+  (голый `--scale` одной группы сбросит остальные к дефолту 1 — это композ-семантика);
+- инстанс называет себя из окружения: `ETCD_INSTANCE` → `POD_NAME` → `HOSTNAME` (hex-ID
+  контейнера), группа — явный `ETCD_GROUP` блока;
+- перечень развёрнутого — только `docker compose ps`: `make instances` (имя, группа, путь),
+  `make registrations` (узлы регистрации etcd), `make pool` (кто реально обслуживает);
+- правила молчания и живая сверка состава генерируются из того же `docker compose ps`
+  (`make silence-rules`, `make check-silence`, `make check-instances`).
+
+Провижеру список не нужен вовсе — он адресуется по сегментам пути узла регистрации, а число
+реплик ему сообщает сам факт регистрации.
 
 ### Прочие настройки, которых нет в `.env`
 
@@ -428,9 +444,10 @@ Makefile (`-include .env`). Фолбэк-дефолт продублирован
 продолжает обслуживать трафик на резервном размере; при `R = 0` — как инстанс без доли: гейт
 закрыт, 503, готовность DOWN.
 
-Проверить всех сразу: `make pool` (колонки `ready` и `reason`). Один инстанс:
-`curl -s localhost:18081/actuator/health/readiness | python3 -m json.tool` и его метрики
-`curl -s localhost:18081/actuator/prometheus | grep '^pool_'`.
+Проверить всех сразу: `make pool` (колонки `ready` и `reason`). Один инстанс — его метрики по IP
+внутри compose-сети (хост-портов нет):
+`curl -s <container-IP>:8080/actuator/health/readiness | python3 -m json.tool` и
+`curl -s <container-IP>:8080/actuator/prometheus | grep '^pool_'`, адрес — `docker inspect`.
 
 ## Регистрация инстансов
 
@@ -451,7 +468,7 @@ Makefile (`-include .env`). Фолбэк-дефолт продублирован
 ```bash
 make registrations            # живые узлы: имя инстанса = последний сегмент ключа
 make config                   # ключи конфигурации (hikari/...) отдельно от узла
-docker compose stop service-a-group-1-1 && make registrations   # узел исчез сразу
+docker stop <hex-ID> && make registrations   # узел исчез сразу
 ```
 
 При `ETCD_ENABLED=false` регистрации нет. Тонкость времени: после `kill -9` узел ещё ~TTL
@@ -508,11 +525,11 @@ ETCD_ENABLED=false java -jar service/target/pool-service-*.jar
 
 ```bash
 make pool                                             # запомнить max= и ready=
-make set-active-max-connections SIZE=120 S=service-a
+make set-active-max-connections SIZE=108 S=service-a  # потолок базы 120 — не подходите вплотную
 make budget S=service-a                               # доли по сервису и их сумма
 make pool                                             # max= совпадает с долей
 curl -s 'localhost:9090/api/v1/query?query=pool_etcd_revision'   # ревизия etcd по инстансам
-docker compose logs --tail=5 service-a-group-1-1      # строка "обновлён на лету: ..."
+docker logs --tail=5 <hex-ID>                         # строка "обновлён на лету: ..."
 ```
 
 Три признака, что всё применилось: `pool_etcd_revision` выросла, `pool_maximum_pool_size` совпадает
@@ -534,14 +551,14 @@ docker compose logs --tail=5 service-a-group-1-1      # строка "обнов
 
 ```bash
 make fleet-sessions S=service-a   # потолки, публикации, «худший случай» и OK/ПРЕВЫШЕНИЕ по сервису
-make pool I=service-a-group-1-1   # unreleasedConnections — долг этого инстанса
+make config I=<hex>               # ключи конфигурации инстанса (hikari/...)
 ```
 
 База на сервис, поэтому `S=` обязателен и сводка без него **отказывает**: сумма флотов обеих баз
 показывалась бы там, где сравнивают с бюджетом одного сервиса (100 против 100), и выглядела бы как
 превышение вдвое. Команда печатает, чью базу смотрит, — по строке заголовка видно, что смотришь
 своё. Ошибка `неизвестный сервис S=…` означает опечатку, а не отсутствие базы: состав сервисов
-берётся из `ETCD_INSTANCES`.
+берётся из узлов регистрации etcd.
 
 `make fleet-sessions` печатает по каждому инстансу потолок, опубликованный долг и оценку «потолок +
 долг», сумму по флоту и сравнение с `N`:
@@ -553,9 +570,9 @@ make pool I=service-a-group-1-1   # unreleasedConnections — долг этог�
            100 |     4
 
 == потолки и публикации (etcd) ==
-  инстанс                                потолок  долг  по отчёту  худший случай
-  service-a/group-1/service-a-group-1-1       25     0         25             25
-  service-a/group-2/service-a-group-2-1       25     0         25             25
+  инстанс                             потолок  долг  по отчёту  худший случай
+  service-a/group-1/261e9a4d5b5e           25     0         25             25
+  service-a/group-2/7103d2afd25d           25     0         25             25
   сумма потолков: 100   по отчёту: 100   худший случай (его видит провижёр): 100
   service-a: по отчёту 100, худший случай 100, бюджет N=100 → OK
 ```
@@ -638,13 +655,15 @@ docker compose exec -T postgres-a sh /tmp/measure-fleet.sh service-a 25
 | `localhost:3100` | хранилище журналов (`loki`), порт из `LOKI_PORT` |
 | `localhost:9187` | сборщик метрик базы `service-a` (`postgres-exporter-a`), порт из `EXPORTER_PORT_A` |
 | `localhost:9188` | сборщик метрик базы `service-b` (`postgres-exporter-b`), порт из `EXPORTER_PORT_B` |
-| `localhost:18081/actuator/prometheus` | текстовая точка метрик **одного инстанса** (восемь портов — 18081…18088) |
+
+Текстовой точки метрик **одного инстанса** на хост-порту больше нет: у инстансов нет хост-портов,
+их метрики читаются из двери (`localhost:9464/metrics`) или по IP контейнера внутри compose-сети.
 
 ```bash
 make targets          # состояние целей сбора: задача, адрес, ошибка последнего обхода
-make check-instances  # живая сверка: у каждого инстанса ETCD_INSTANCES есть ряды в наблюдении
-make silence-rules    # перегенерировать правила молчания инстансов после правки ETCD_INSTANCES
-make check-silence    # зафиксированные правила молчания совпадают с ETCD_INSTANCES (в make test)
+make check-instances  # живая сверка: у каждого инстанса docker compose ps есть ряды в наблюдении
+make silence-rules    # перегенерировать правила молчания инстансов после смены состава (scale)
+make check-silence    # зафиксированные правила молчания совпадают с docker compose ps (в make test)
 make door-config      # проверить конфигурацию двери сигналов (в make test)
 ```
 
@@ -711,10 +730,10 @@ make door-config      # проверить конфигурацию двери �
 Сценарий на живом стенде, проверенный глазами:
 
 ```bash
-make set-active-max-connections SIZE=120 S=service-a   # потолки инстансов service-a: 25 -> 30
-make pool                                              # величина: max=30 у всех четырёх
-curl -s 'localhost:9090/api/v1/query?query=pool_maximum_pool_size{node="service-a-group-1-1"}'
-# -> "30"
+make set-active-max-connections SIZE=108 S=service-a   # потолки инстансов service-a: 25 -> 27
+make pool                                              # величина: max=27 у всех четырёх
+curl -s 'localhost:9090/api/v1/query?query=pool_maximum_pool_size{node="261e9a4d5b5e"}'
+# -> "27"
 ```
 
 Журнал того же инстанса за этот момент (запрос из панели, вручную):
@@ -722,10 +741,10 @@ curl -s 'localhost:9090/api/v1/query?query=pool_maximum_pool_size{node="service-
 ```bash
 NOW=$(python3 -c 'import time;print(int(time.time()*1e9))')
 curl -s -G 'localhost:3100/loki/api/v1/query_range' \
-  --data-urlencode 'query={node="service-a-group-1-1"} |= "maximumPoolSize"' \
+  --data-urlencode 'query={node="261e9a4d5b5e"} |= "maximumPoolSize"' \
   --data-urlencode "start=$((NOW-300000000000))" --data-urlencode "end=$NOW"
-# [etcd@3361 [maximumPoolSize=put]] пул 'service-a-group-1-1' обновлён на лету:
-#   maximumPoolSize: 25 -> 30, minimumIdle: 25 -> 30 | now: max=30 minIdle=30 total=30
+# [etcd@3361 [maximumPoolSize=put]] пул '261e9a4d5b5e' обновлён на лету:
+#   maximumPoolSize: 25 -> 27, minimumIdle: 25 -> 27 | now: max=27 minIdle=27 total=27
 ```
 
 Трасса с тем же событием (идентификатор трассы берётся из записи журнала выше — в примере это
@@ -734,7 +753,7 @@ curl -s -G 'localhost:3100/loki/api/v1/query_range' \
 ```bash
 curl -s 'localhost:3200/api/traces/c73fddc87721360da995f5a494dad441'
 # SPAN pool.config.apply, 145мс
-#   pool.max.before = 25, pool.max.after = 30, config.outcome = RESIZED
+#   pool.max.before = 25, pool.max.after = 27, config.outcome = RESIZED
 #   config.reason = etcd@3361 [maximumPoolSize=put]
 ```
 
@@ -788,7 +807,8 @@ curl -s 'localhost:3200/api/traces/c73fddc87721360da995f5a494dad441'
 ### Правила
 
 Правила объявлены в двух файлах: общие — `prometheus/rules/stand.yml`, молчание инстанса —
-`prometheus/rules/instances.yml` (генерируется из `ETCD_INSTANCES`, `make silence-rules`). Оба
+`prometheus/rules/instances.yml` (генерируется из состава `docker compose ps`,
+`make silence-rules`). Оба
 проверяются `promtool` в составе `make test` (`check config`, `check rules` и `test rules` —
 последнее проверяет, что правило **молчит на норме и срабатывает на нарушении**) и **ничего не
 доставляют**: alertmanager не подключён. Сработавшие видно в панели правил витрины и запросом:
@@ -811,7 +831,7 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
 Пока сборщик опрашивал каждый инстанс отдельно, молчание процесса означало молчание цели, и список
 целей выражал это само собой. Теперь метрики идут отправкой в одну дверь, у сборщика одна цель на
 весь флот — и молчание одного инстанса она не выражает. Взамен появилось **по одному правилу на
-инстанс**, выведенному из того же канонического списка `ETCD_INSTANCES`
+инстанс**, выведенному из того же состава `docker compose ps`
 (`make silence-rules`, сверка — `make check-silence`).
 
 Ряд, по которому судит молчание, — состояние пула: он есть у процесса **всегда**, независимо от
@@ -888,11 +908,11 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
 | цель `door` в состоянии `down` | дверь не поднялась или отдавать нечего: `docker compose logs otel-collector` (в её журнале видны и отказы по отдельным сигналам), `curl -fsS localhost:9464/metrics` |
 | `make check-instances` называет инстансы без рядов | по одному: стенд остановился (`make pool`), либо отправка в дверь не доходит — проверьте адрес в `OTEL_METRICS_URL`; недоступная дверь отключает наблюдение целиком |
 | ряды пропадают у всех сразу, а приложения живы | дверь отказывает в метриках по памяти: `docker compose logs otel-collector \| grep -i 'dropped\|reject'`. Ограничителей три, по одному на сигнал, и метрики отказываются последними — но при полном заполнении отказать могут и они |
-| журнала инстанса нет в хранилище журналов | журналы идут отправкой, а не чтением файлов: `curl -s localhost:3100/loki/api/v1/labels` (метки `node`/`group`/`service` должны быть), `docker compose logs loki`. Console-вывод при этом остаётся: `docker compose logs service-a-group-1-1` |
+| журнала инстанса нет в хранилище журналов | журналы идут отправкой, а не чтением файлов: `curl -s localhost:3100/loki/api/v1/labels` (метки `node`/`group`/`service` должны быть), `docker compose logs loki`. Console-вывод при этом остаётся: `docker logs <hex-ID>` |
 | трассы инстанса нет | `docker compose logs tempo`; поиск: `curl -s -G localhost:3200/api/search --data-urlencode 'q={ resource.node = "<инстанс>" }'`. Служебные запросы отбираются по `OTEL_TRACES_SAMPLING`, события механизма — всегда |
-| `make check-silence` ругается на расхождение | `make silence-rules` после правки `ETCD_INSTANCES`, затем `docker compose restart prometheus` |
+| `make check-silence` ругается на расхождение | `make silence-rules` после смены состава (scale), затем перечитайте правила: `curl -fsS -X POST http://localhost:9090/-/reload` (так же делает `make up`) |
 | панели витрины пустые | `docker compose logs grafana` — поставщик файлов читает `/etc/grafana/dashboards`, а не `/var/lib/grafana/dashboards` |
-| на панели «Пулы и конфигурация» нет сессий базы | сборщик нужной базы не поднят (`docker compose logs postgres-exporter-a postgres-exporter-b`; в `make targets` цель `postgres` должна быть `up`) либо имя инстанса не начинается с `service-`: отбор ведётся переменной `$pool_app` |
+| на панели «Пулы и конфигурация» нет сессий базы | сборщик нужной базы не поднят (`docker compose logs postgres-exporter-a postgres-exporter-b`; в `make targets` цель `postgres` должна быть `up`) либо инстанс не попал в join: сессии пулов опознаются join'ом по `application_name` ↔ `node` метрик пула, а не шаблоном имён; `$pool_app` — только фильтр детализации |
 | в базе видны сессии чужого сервиса | нарушено соглашение об именах: `application_name` у инстансов уникален на стенд, чужой сервис в чужой базе означает, что инстанс подключился не к своей базе (проверьте `DB_URL` в `docker compose config`) |
 | после рестарта витрины правки панелей пропали | так и задумано, поставщик запрещает сохранение; правьте `grafana/dashboards/` |
 | график есть, а `ALERTS` пуст | так и есть: правила молчат; состояние целей — `make targets` |
@@ -918,28 +938,35 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
 - **Один путь — один инстанс.** Конфиг пишется под каждый инстанс отдельно (`I=`/`S=`/`G=` в
   Makefile — это ручная группировка, а не репликация конфига). Если захочется «один конфиг на
   группу», нужен отдельный механизм распространения.
-- **8 JVM на один хост.** Стенд — это демо-машина: `mem_limit: 512m` на инстанс
-  (`-XX:MaxRAMPercentage=70`), но 8 подов + postgres + etcd + Traefik всё равно заметно едят память.
-  На продакшен это переносится как Deployment/StatefulSet с `POD_NAME`/`POD_NAMESPACE`, а не как
-  compose на одной машине.
+- **Число реплик — `--scale`, а не список.** Состав не существует: `docker compose up --scale`,
+  инстанс называет себя из окружения (`ETCD_INSTANCE` → `POD_NAME` → `HOSTNAME`). На производство
+  это переносится как Deployment/ReplicaSet (имя пода) или StatefulSet (имя пода — стабильный
+  сегмент `instance`, и `HOSTNAME` можно не полагать: `${ETCD_INSTANCE:${POD_NAME:...}}` уже в
+  цепочке). Демо остаётся на compose: реплики групп на одной машине.
 - **Пул только один на процесс.** Несколько независимых пулов (к разным БД, с разными профилями)
   не поддержаны: один `ManagedPool`, один `EtcdPoolConfigSource`, один путь.
 
 ### Балансировка
 
-- **Неготовый инстанс исключается не мгновенно.** Traefik опрашивает
-  `/actuator/health/readiness` каждые 1с, поэтому между потерей готовности и исчезновением
-  инстанса из ротации есть окно — на стенде замерено 0.93с. В это окно клиент получает отказ
-  напрямую: повтор запроса у другого инстанса нет, в отличие от прежней схемы с
-  `proxy_next_upstream`, и это осознанный размен.
-- **Период опроса — часть контракта, а не настройка.** `1s` задан в `scripts/balancers.py`, и
-  требование спеки привязано к нему («не позднее одного периода опроса»). Увеличение интервала
-  меняет смысл требования, а не ускоряет стенд.
+- **Неготовый инстанс исключается не мгновенно.** Traefik (docker-провайдер) опрашивает
+  `/actuator/health/readiness` каждые 1с (интервал задан в метках `x-service-a`/`x-service-b` в
+  `docker-compose.yml`), поэтому между потерей готовности и исчезновением
+  инстанса из ротации есть окно — на стенде замерено около секунды. В это окно клиент получает
+  отказ напрямую: повторов запроса у другого инстанса нет, и это осознанный размен.
+- **Период опроса — часть контракта, а не настройка.** `1s` задан в метке healthcheck
+  (`traefik.http.services.fleet-<service>.loadbalancer.healthcheck.interval`), и требование спеки
+  привязано к нему («не позднее одного периода опроса»). Увеличение интервала меняет смысл
+  требования, а не ускоряет стенд.
 - **Готовность одной точки входа не видна в healthcheck контейнера.** `/ping` у Traefik один на
-  процесс и отвечает 200 всегда. Поэтому `make up` ждёт не его, а запроса `/actuator/prometheus` через
-  каждую точку входа — зелёный `/ping` не отличил бы «жив, но `web-b` без маршрута».
+  процесс и отвечает 200 всегда. Поэтому `make up` (`scripts/wait-ready.sh`) ждёт не его, а запроса
+  `/actuator/prometheus` через каждую точку входа — зелёный `/ping` не отличил бы «жив, но `web-b`
+  без маршрута».
 - **Ротация круговая, весов нет.** Все готовые инстансы сервиса равны; если группу надо
   обслуживать неравномерно, это отдельная задача (веса или разные точки входа).
+- **Состав бэкендов следует за docker, а не за файлом.** Провайдер подхватывает появление и
+  остановку контейнеров по событиям docker: масштабирование применяется без рестарта, остановленный
+  контейнер исчезает из ротации сразу. Плата: одна точка отказа на процесс — падение `lb` уводит
+  трафик обоих сервисов (точки входа раздельные, но процесс один).
 
 ### Блокировки
 
@@ -1030,11 +1057,13 @@ curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertstate="firing"}' | python
   не читает. Для пути из ~10 ключей бесплатно; при росте пути начнёт нагружать канал событий.
 - **Валидации против `max_connections` у postgres нет.** Бюджет `PROV_ACTIVE_MAX_CONNECTIONS` задаёт
   сумму долей, но потолок базы он проверяет только тем, что провижёр пишет доли, а не их сумму
-  «поверх» лимита. Если сумма долей всех сервисов стенда превысит `max_connections` postgres
-  (дефолт стенда — 200, два сервиса по 100 впритык), сессии будут отклоняться под нагрузкой;
-  при точном равенстве бюджетов лимиту (100+100=200) слотов не остаётся даже для админ-psql —
-  наблюдалось на стенде при rolling-прогоне.
-  Считать: `make budget` по каждому сервису и складывать.
+  «поверх» лимита. Потолок базы на стенде — `POSTGRES_MAX_CONNECTIONS=120` **на сервис**, бюджет по
+  умолчанию 100, запас 20: он меньше доли инстанса (25), поэтому поломку порядка выдачи мест ловит
+  сама база, и больше того, что занимает стенд сам (7–9 соединений), поэтому `psql` оператора и
+  сборщик проходят при полном флоте. Задайте сервису `N ≥ 120` — флот займёт все слоты и
+  операторский `psql` начнёт получать `FATAL: sorry, too many clients already` (наблюдалось на
+  стенде при `N=120`); `N > 120` — отказывает уже сам пул.
+  Считать: `make budget` по каждому сервису и складывать — потолки у сервисов отдельные.
 - **`minimumIdle` по умолчанию следует за `maximumPoolSize`**, то есть в стенде пул держит
   максимум соединений всегда. Это удобно для демо и обычно неверно для прода: лишние коннекты
   съедают лимит postgres, а при `eager-fill-on-resize=true` ещё и открываются сразу.

@@ -11,7 +11,7 @@ make set-active-max-connections SIZE=100 S=service-a
      ▼
 провизёр делит бюджет активного флота между активными инстансами сервиса
 (неактивные держат резерв R, сумма долей + резерв = 100)
-     │  etcdctl put .../instances/service-a-group-1-1/hikari/maximumPoolSize 25
+     │  etcdctl put .../instances/1f2e3d4c5b6a/hikari/maximumPoolSize 25
      ▼
 jetcd: событие watch (WatchResponse с батчем событий)
      │  EtcdPoolConfigSource.onEvent()            etcd/EtcdPoolConfigSource.java
@@ -54,7 +54,14 @@ ManagedPool.apply(desired, reason)                 pool/ManagedPool.java:164  (s
 - `root` — `ETCD_ROOT`, дефолт `/config`;
 - `service` — `SERVICE_NAME`, фолбэк `spring.application.name`;
 - `group` — `ETCD_GROUP`, фолбэк `POD_NAMESPACE`;
-- `instance` — `ETCD_INSTANCE`, фолбэк `POD_NAME`.
+- `instance` — `ETCD_INSTANCE`, фолбэк `POD_NAME`, затем `HOSTNAME` (последний пункт — имя хоста
+  контейнера, в docker это короткий hex-ID контейнера; именно он и есть имя узла регистрации и
+  `POOL_NAME` пула).
+
+Идентичность инстанса приходит из окружения, а не из файла состава: число реплик задаётся
+масштабированием (`docker compose up --scale`), перечень имён не существует. В контейнере
+`HOSTNAME` всегда заполнен, поэтому гейт валидации сегментов работает только на последнем звене
+цепочки; `pool-name` (`POOL_NAME`) пула по умолчанию следует за именем инстанса.
 
 Сегменты проверяются на пустоту и на отсутствие `/`; при `pool.etcd.enabled=true` пустой или
 битый сегмент прекращает запуск с именем проблемного сегмента. Выключенный источник
