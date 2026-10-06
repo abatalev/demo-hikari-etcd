@@ -19,7 +19,7 @@ public record PoolSize(Integer maximumPoolSize, Integer minimumIdle) {
     /**
      * Верхняя граница размера пула. Нижняя граница локального значения — 0 (пула нет: размер
      * приходит только из etcd, а 0 из хранилища отклоняется источником до normalize — см.
-     * {@code EtcdPoolConfigSource.apply}).
+     * {@code EtcdConfigWorker.apply}).
      */
     public static final int POOL_SIZE_MAX = 200;
 
