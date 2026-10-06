@@ -284,7 +284,7 @@ public class ConfigProvisioner implements SmartLifecycle {
     /** Живой набор сервисов: сегмент {@code {service}} узлов регистрации (не ключей конфигурации). */
     private Set<String> scanServices(Client c) throws Exception {
         GetResponse resp = c.getKVClient()
-                .get(bs(servicesPrefix), GetOption.newBuilder().isPrefix(true).build())
+                .get(bs(servicesPrefix), GetOption.builder().isPrefix(true).build())
                 .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
         List<String> keys = new ArrayList<>(resp.getKvs().size());
         for (KeyValue kv : resp.getKvs()) {
@@ -302,8 +302,8 @@ public class ConfigProvisioner implements SmartLifecycle {
         ensureCandidate(c, service, lease);
         String prefix = leaderRootPrefix + service + "/";
         GetResponse resp = c.getKVClient()
-                .get(bs(prefix), GetOption.newBuilder()
-                        .withPrefix(bs(prefix))
+                .get(bs(prefix), GetOption.builder()
+                        .isPrefix(true)
                         .withSortField(GetOption.SortTarget.CREATE)
                         .withSortOrder(GetOption.SortOrder.ASCEND)
                         .withLimit(1)
@@ -346,7 +346,7 @@ public class ConfigProvisioner implements SmartLifecycle {
         TxnResponse resp = c.getKVClient().txn()
                 .If(new Cmp(bs(key), Cmp.Op.EQUAL, CmpTarget.createRevision(0)))
                 .Then(Op.put(bs(key), bs(replicaName),
-                        PutOption.newBuilder().withLeaseId(lease).build()))
+                        PutOption.builder().withLeaseId(lease).build()))
                 .commit()
                 .get(callTimeoutMs(), TimeUnit.MILLISECONDS);
         if (resp.isSucceeded()) {

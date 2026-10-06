@@ -166,7 +166,7 @@ final class EtcdConfigWorker {
     /** Полный снимок пути + применение. */
     private long snapshot(Client c) throws Exception {
         GetResponse response = c.getKVClient()
-                .get(pathBytes(), GetOption.newBuilder().isPrefix(true).build())
+                .get(pathBytes(), GetOption.builder().isPrefix(true).build())
                 .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
 
         Map<String, String> fresh = new ConcurrentHashMap<>();
@@ -194,8 +194,8 @@ final class EtcdConfigWorker {
         ByteSequence prefix = pathBytes();
 
         try (Watch.Watcher watcher = c.getWatchClient().watch(prefix,
-                WatchOption.newBuilder()
-                        .withPrefix(prefix)
+                WatchOption.builder()
+                        .isPrefix(true)
                         .withRevision(fromRevision)
                         .withPrevKV(true)
                         .build(),

@@ -146,7 +146,7 @@ final class UnreleasedShrinkPublisher {
                             .put(
                                     ByteSequence.from(unreleasedPath, StandardCharsets.UTF_8),
                                     ByteSequence.from(Integer.toString(value), StandardCharsets.UTF_8),
-                                    PutOption.newBuilder().withLeaseId(lease).build())
+                                    PutOption.builder().withLeaseId(lease).build())
                             .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS));
             log.info("опубликовано неосвобождённое сжатие: {} (потолок {}, удерживается {})",
                     value, pool.runtime().maximumPoolSize(), debt);

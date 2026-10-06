@@ -59,7 +59,7 @@ final class InstanceRegistration {
                 shared.registrationLease.set(lease);
                 c.getKVClient()
                         .put(ByteSequence.from(nodePath, StandardCharsets.UTF_8), ByteSequence.EMPTY,
-                                PutOption.newBuilder().withLeaseId(lease).build())
+                                PutOption.builder().withLeaseId(lease).build())
                         .get(properties.getCallTimeout().toMillis(), TimeUnit.MILLISECONDS);
                 log.info("инстанс зарегистрирован: узел {} (lease={}, ttl={}s)", nodePath, lease, ttlSeconds);
                 while (shared.running.get()) {

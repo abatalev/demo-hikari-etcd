@@ -209,7 +209,7 @@ final class ProvisioningWorker implements Runnable {
     private Tree scan(Client c) throws Exception {
         GetResponse resp = c.getKVClient()
                 .get(ConfigProvisioner.bs(subtreePrefix),
-                        GetOption.newBuilder().isPrefix(true).build())
+                        GetOption.builder().isPrefix(true).build())
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
 
         Tree tree = new Tree(resp.getHeader().getRevision());
@@ -266,7 +266,7 @@ final class ProvisioningWorker implements Runnable {
     private Map<String, Boolean> readFleetMarkers(Client c) throws Exception {
         GetResponse resp = c.getKVClient()
                 .get(ConfigProvisioner.bs(GroupFleetKey.groupsPrefix(owner.properties().getRoot())),
-                        GetOption.newBuilder().isPrefix(true).build())
+                        GetOption.builder().isPrefix(true).build())
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
         Map<String, Boolean> markers = new HashMap<>();
         for (KeyValue kv : resp.getKvs()) {
@@ -782,7 +782,7 @@ final class ProvisioningWorker implements Runnable {
     private void wipe(Client c, String hikariPrefix) throws Exception {
         DeleteResponse del = c.getKVClient()
                 .delete(ConfigProvisioner.bs(hikariPrefix),
-                        DeleteOption.newBuilder().isPrefix(true).build())
+                        DeleteOption.builder().isPrefix(true).build())
                 .get(owner.callTimeoutMs(), TimeUnit.MILLISECONDS);
         long deleted = del.getDeleted();
         if (deleted > 0) {
@@ -803,8 +803,8 @@ final class ProvisioningWorker implements Runnable {
         CountDownLatch finished = new CountDownLatch(1);
         ByteSequence prefix = ConfigProvisioner.bs(subtreePrefix);
         try (Watch.Watcher watcher = c.getWatchClient().watch(prefix,
-                WatchOption.newBuilder()
-                        .withPrefix(prefix)
+                WatchOption.builder()
+                        .isPrefix(true)
                         .withRevision(fromRevision)
                         .build(),
                 new Watch.Listener() {
