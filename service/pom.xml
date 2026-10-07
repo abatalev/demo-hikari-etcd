@@ -97,7 +97,9 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
 
-            <!-- Статический анализ: goal check привязан к фазе verify (дефолт гола), гейт p1–p2. -->
+            <!-- Статический анализ: goal check привязан к фазе verify (дефолт гола), гейт p1–p2.
+                 Внутри конфигурации подключены детекторы безопасности OWASP Find Security Bugs:
+                 1.14.0 собрана против core 4.8.6 (provided) и с 4.9.3 совместима. -->
             <plugin>
                 <groupId>com.github.spotbugs</groupId>
                 <artifactId>spotbugs-maven-plugin</artifactId>
@@ -106,6 +108,36 @@
                     <effort>Max</effort>
                     <threshold>Medium</threshold>
                     <failOnError>true</failOnError>
+                    <plugins>
+                        <plugin>
+                            <groupId>com.h3xstream.findsecbugs</groupId>
+                            <artifactId>findsecbugs-plugin</artifactId>
+                            <version>1.14.0</version>
+                        </plugin>
+                    </plugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Неиспользуемый код: локальные переменные, private-поля, лишние импорты.
+                 Общий ruleset лежит в корне репозитория; goal check привязан к verify, как и
+                 SpotBugs. PMD 7.17.0 — версия плагина 3.28.0 по умолчанию. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-pmd-plugin</artifactId>
+                <version>3.28.0</version>
+                <configuration>
+                    <rulesets>
+                        <ruleset>../pmd-ruleset.xml</ruleset>
+                    </rulesets>
+                    <failOnViolation>true</failOnViolation>
+                    <printFailingErrors>true</printFailingErrors>
                 </configuration>
                 <executions>
                     <execution>

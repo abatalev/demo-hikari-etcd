@@ -29,7 +29,6 @@ import org.springframework.context.ApplicationEventPublisher;
 
 import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
-import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 import com.abatalev.demo.etcdhikari.service.pool.InvalidSettingsException;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource.EtcdStatus;
@@ -69,7 +68,6 @@ final class EtcdConfigWorker {
     private final EtcdProperties properties;
     private final ApplicationEventPublisher eventPublisher;
     private final PoolCounters counters;
-    private final MechanismSpans spans;
     private final EtcdShared shared;
     private final String path;
 
@@ -87,13 +85,12 @@ final class EtcdConfigWorker {
     private final AtomicBoolean emptyPrefixLogged = new AtomicBoolean();
 
     EtcdConfigWorker(ManagedPool pool, EtcdProperties properties,
-            ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismSpans spans,
+            ApplicationEventPublisher eventPublisher, PoolCounters counters,
             EtcdShared shared, String path) {
         this.pool = pool;
         this.properties = properties;
         this.eventPublisher = eventPublisher;
         this.counters = counters;
-        this.spans = spans;
         this.shared = shared;
         this.path = path;
     }
@@ -193,7 +190,7 @@ final class EtcdConfigWorker {
         CountDownLatch finished = new CountDownLatch(1);
         ByteSequence prefix = pathBytes();
 
-        try (Watch.Watcher watcher = c.getWatchClient().watch(prefix,
+        try (Watch.Watcher ignored = c.getWatchClient().watch(prefix,
                 WatchOption.builder()
                         .isPrefix(true)
                         .withRevision(fromRevision)

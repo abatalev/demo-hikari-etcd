@@ -97,7 +97,7 @@ public class MechanismSpans implements SmartLifecycle {
 
     /** Мгновенное событие механизма (выборы, опубликованная величина). */
     public void event(String name, Consumer<SpanBuilder> attributes) {
-        try (Event e = start(name, attributes)) {
+        try (Event ignored = start(name, attributes)) {
             // тела нет: событие мгновенное, время выполнения нечего мерить
         }
     }
@@ -122,7 +122,7 @@ public class MechanismSpans implements SmartLifecycle {
     public <T> T call(String name, Consumer<SpanBuilder> attributes, ThrowingFunction<Span, T> body)
             throws Exception {
         Span span = startSpanOrInvalid(name, attributes);
-        try (Scope scope = span.makeCurrent()) {
+        try (Scope ignored = span.makeCurrent()) {
             T result = body.apply(span);
             span.setStatus(StatusCode.OK);
             return result;
@@ -154,7 +154,7 @@ public class MechanismSpans implements SmartLifecycle {
      */
     public <T> T callQuietly(String name, Consumer<SpanBuilder> attributes, Function<Span, T> body) {
         Span span = startSpanOrInvalid(name, attributes);
-        try (Scope scope = span.makeCurrent()) {
+        try (Scope ignored = span.makeCurrent()) {
             T result = body.apply(span);
             span.setStatus(StatusCode.OK);
             return result;

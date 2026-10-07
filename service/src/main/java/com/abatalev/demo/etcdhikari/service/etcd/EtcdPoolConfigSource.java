@@ -78,8 +78,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             nodePath = null;
             unreleasedPath = null;
         }
-        this.worker = new EtcdConfigWorker(pool, properties, eventPublisher, counters, this.spans,
-                shared, path);
+        this.worker = new EtcdConfigWorker(pool, properties, eventPublisher, counters, shared, path);
         this.registration = new InstanceRegistration(properties, shared, nodePath, path);
         this.publisher = new UnreleasedShrinkPublisher(pool, properties, this.spans, shared,
                 unreleasedPath);

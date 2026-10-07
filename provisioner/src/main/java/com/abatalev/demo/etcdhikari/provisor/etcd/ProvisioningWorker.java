@@ -802,7 +802,7 @@ final class ProvisioningWorker implements Runnable {
     private void watch(Client c, long fromRevision) throws Exception {
         CountDownLatch finished = new CountDownLatch(1);
         ByteSequence prefix = ConfigProvisioner.bs(subtreePrefix);
-        try (Watch.Watcher watcher = c.getWatchClient().watch(prefix,
+        try (Watch.Watcher ignored = c.getWatchClient().watch(prefix,
                 WatchOption.builder()
                         .isPrefix(true)
                         .withRevision(fromRevision)

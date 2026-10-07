@@ -38,6 +38,10 @@ public class TrafficGateFilter extends OncePerRequestFilter {
     }
 
     @Override
+    @SuppressFBWarnings(value = "XSS_SERVLET",
+            justification = "findsecbugs ловит любой PrintWriter.write в сервлете; здесь пишется JSON с внутренней "
+                    + "причиной из закрытого набора (NotReadyCause.describe), не пользовательский ввод, и контент-тип "
+                    + "application/json, а не text/html")
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
         if (!configSource.isTrafficAllowed()) {
