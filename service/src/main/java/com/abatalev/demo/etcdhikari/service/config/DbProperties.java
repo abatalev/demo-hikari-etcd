@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
@@ -102,7 +103,8 @@ public class DbProperties {
      * пришёл размер, — на каждом применении конфигурации.
      */
     public List<String> warningsFor(PoolSize size) {
-        if (idleTimeoutMs > 0 && size.maximumPoolSize() > 0 && size.minimumIdle() == size.maximumPoolSize()) {
+        if (idleTimeoutMs > 0 && size.maximumPoolSize() > 0
+                && Objects.equals(size.minimumIdle(), size.maximumPoolSize())) {
             return List.of("idleTimeout не применим: minimumIdle == maximumPoolSize");
         }
         return List.of();

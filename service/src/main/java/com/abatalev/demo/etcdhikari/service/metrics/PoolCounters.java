@@ -1,5 +1,6 @@
 package com.abatalev.demo.etcdhikari.service.metrics;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Component;
@@ -23,6 +24,8 @@ public class PoolCounters {
     private final Counter resizeShrink;
     private final Counter recreated;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "MeterRegistry — Spring-бин, разделяется по дизайну")
     public PoolCounters(MeterRegistry registry) {
         this.registry = registry;
         this.configApplied = registry.counter("pool.config.applied");
@@ -33,6 +36,8 @@ public class PoolCounters {
         this.recreated = registry.counter("pool.recreate");
     }
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+            justification = "MeterRegistry — Spring-бин, оборачивать нечего")
     public MeterRegistry registry() {
         return registry;
     }

@@ -1,5 +1,6 @@
 package com.abatalev.demo.etcdhikari.provisor.etcd;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,6 +37,19 @@ public final class PoolSizeDistribution {
      *     вовсе — провизор ничего не меняет, чтобы опечатка в etcd не обнулила живой сервис
      */
     public record Result(List<Share> shares, int excess, String refusal) {
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+                justification = "record-компоненты — контракт данных; явный канонический конструктор — рабочая "
+                        + "точка подавления (класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public Result {
+        }
+
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public List<Share> shares() {
+            return shares;
+        }
 
         /** Распределение отклонено (неразбираемое значение бюджета или минимума). */
         public boolean refused() {

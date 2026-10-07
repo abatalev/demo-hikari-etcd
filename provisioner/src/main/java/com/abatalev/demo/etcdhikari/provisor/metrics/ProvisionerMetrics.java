@@ -1,5 +1,6 @@
 package com.abatalev.demo.etcdhikari.provisor.metrics;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -38,6 +39,8 @@ public class ProvisionerMetrics {
     private final Counter prefixWipes;
     private final Counter stuckDebtWarnings;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "MeterRegistry — Spring-бин, разделяется по дизайну")
     public ProvisionerMetrics(MeterRegistry registry) {
         this.registry = registry;
         this.recompute = registry.counter("provision.recompute");

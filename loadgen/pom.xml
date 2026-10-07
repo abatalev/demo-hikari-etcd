@@ -42,6 +42,25 @@
           <mainClass>com.abatalev.demo.etcdhikari.loadgen.LoadGenApp</mainClass>
         </configuration>
       </plugin>
+
+      <!-- Статический анализ: goal check привязан к фазе verify (дефолт гола), гейт p1–p2. -->
+      <plugin>
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-maven-plugin</artifactId>
+        <version>4.9.3.0</version>
+        <configuration>
+          <effort>Max</effort>
+          <threshold>Medium</threshold>
+          <failOnError>true</failOnError>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 </project>

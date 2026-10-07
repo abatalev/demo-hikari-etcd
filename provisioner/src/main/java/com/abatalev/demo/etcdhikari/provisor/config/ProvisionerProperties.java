@@ -3,6 +3,7 @@ package com.abatalev.demo.etcdhikari.provisor.config;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -74,11 +75,13 @@ public class ProvisionerProperties {
     private Duration leaderTtl = Duration.ofSeconds(10);
 
     public List<String> getEndpoints() {
-        return endpoints;
+        // Неизменяемая обёртка: чтение клиентом не должно влиять на конфигурацию процесса.
+        return Collections.unmodifiableList(endpoints);
     }
 
     public void setEndpoints(List<String> endpoints) {
-        this.endpoints = endpoints;
+        // Копия: Spring-биндинг не должен разделять список с вызывающим кодом.
+        this.endpoints = List.copyOf(endpoints);
     }
 
     public String getRoot() {

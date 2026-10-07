@@ -1,6 +1,7 @@
 package com.abatalev.demo.etcdhikari.service.config;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -55,11 +56,13 @@ public class EtcdProperties {
     }
 
     public List<String> getEndpoints() {
-        return endpoints;
+        // Неизменяемая обёртка: чтение клиентом не должно влиять на конфигурацию процесса.
+        return Collections.unmodifiableList(endpoints);
     }
 
     public void setEndpoints(List<String> endpoints) {
-        this.endpoints = endpoints;
+        // Копия: Spring-биндинг не должен разделять список с вызывающим кодом.
+        this.endpoints = List.copyOf(endpoints);
     }
 
     public String getRoot() {

@@ -1,5 +1,6 @@
 package com.abatalev.demo.etcdhikari.service.pool;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -39,8 +40,19 @@ public record PoolSize(Integer maximumPoolSize, Integer minimumIdle) {
 
         return new Normalized(new PoolSize(max, minIdle), warnings);
     }
+    public record Normalized(PoolSize size, List<String> warnings) {
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+                justification = "поименованное подавление на каноническом конструкторе: record-компоненты — контракт данных")
+        public Normalized {
+        }
 
-    public record Normalized(PoolSize size, List<String> warnings) {}
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "поименованное подавление на акцессоре: record-компоненты — контракт данных")
+        public List<String> warnings() {
+            return warnings;
+        }
+    }
 
     /** Список изменений вида "maximumPoolSize: 10 -> 20" для логов и признаков трассы. */
     public List<String> diff(PoolSize other) {

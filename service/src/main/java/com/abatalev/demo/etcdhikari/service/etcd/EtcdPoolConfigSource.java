@@ -13,6 +13,7 @@ import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
 import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * Фасад источника конфигурации пула: координирует три независимых цикла на общем состоянии.
@@ -56,6 +57,8 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     private volatile Thread registrationThread;
     private volatile Thread publicationThread;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "Spring-бины (ManagedPool, EtcdProperties) разделяются контейнером по дизайну")
     public EtcdPoolConfigSource(ManagedPool pool, EtcdProperties properties,
             ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismSpans spans) {
         this.pool = pool;
@@ -264,7 +267,6 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             };
         }
     }
-
     public record EtcdStatus(
             boolean enabled,
             boolean connected,
@@ -280,5 +282,35 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
             long applyCount,
             ManagedPool.Outcome lastOutcome,
             /** причина закрытой готовности; null, когда источник выключен или трафик открыт */
-            String notReadyReason) {}
+            String notReadyReason) {
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+                justification = "record-компоненты — контракт данных; явный канонический конструктор — рабочая "
+                        + "точка подавления (класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public EtcdStatus {
+        }
+
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public List<String> endpoints() {
+            return endpoints;
+        }
+
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public Map<String, String> keys() {
+            return keys;
+        }
+
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public Map<String, String> problems() {
+            return problems;
+        }
+    }
 }

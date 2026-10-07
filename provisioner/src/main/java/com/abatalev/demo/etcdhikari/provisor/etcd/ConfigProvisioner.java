@@ -3,6 +3,7 @@ package com.abatalev.demo.etcdhikari.provisor.etcd;
 import com.abatalev.demo.etcdhikari.provisor.config.ProvisionerProperties;
 import com.abatalev.demo.etcdhikari.provisor.metrics.ProvisionerMetrics;
 import com.abatalev.demo.etcdhikari.provisor.otel.MechanismSpans;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.KeyValue;
@@ -88,6 +89,8 @@ public class ConfigProvisioner implements SmartLifecycle {
     private volatile Thread leaseThread;
     private volatile Thread electionThread;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "Spring-бины (ProvisionerProperties, ProvisionerMetrics) разделяются контейнером по дизайну")
     public ConfigProvisioner(ProvisionerProperties properties, ProvisionerMetrics metrics,
             MechanismSpans spans) {
         this.properties = properties;

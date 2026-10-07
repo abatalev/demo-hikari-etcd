@@ -2,6 +2,7 @@ package com.abatalev.demo.etcdhikari.service.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -24,6 +25,8 @@ public class TrafficGateFilter extends OncePerRequestFilter {
     private final EtcdPoolConfigSource configSource;
     private final ObjectMapper objectMapper;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "Spring-бины (EtcdPoolConfigSource, ObjectMapper) разделяются контейнером по дизайну")
     public TrafficGateFilter(EtcdPoolConfigSource configSource, ObjectMapper objectMapper) {
         this.configSource = configSource;
         this.objectMapper = objectMapper;

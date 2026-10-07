@@ -3,6 +3,7 @@ package com.abatalev.demo.etcdhikari.service.metrics;
 import com.zaxxer.hikari.metrics.IMetricsTracker;
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.metrics.PoolStats;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -47,6 +48,8 @@ public class HikariEventMetrics implements MetricsTrackerFactory {
 
     private final MeterRegistry registry;
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "MeterRegistry — Spring-бин, разделяется по дизайну")
     public HikariEventMetrics(MeterRegistry registry) {
         this.registry = registry;
     }

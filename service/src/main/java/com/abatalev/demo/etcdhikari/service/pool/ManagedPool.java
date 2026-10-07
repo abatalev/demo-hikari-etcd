@@ -25,6 +25,7 @@ import com.abatalev.demo.etcdhikari.service.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.metrics.HikariEventMetrics;
 import com.abatalev.demo.etcdhikari.service.metrics.PoolCounters;
 import com.abatalev.demo.etcdhikari.service.otel.MechanismSpans;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * DataSource поверх HikariCP, который никогда не пересоздаётся "просто так".
@@ -120,6 +121,8 @@ public class ManagedPool implements DataSource, AutoCloseable {
      * @param timeoutMs сколько ждать, если изменений не будет
      * @return текущая версия
      */
+    @SuppressFBWarnings(value = "RV_RETURN_VALUE_IGNORED_BAD_PRACTICE",
+            justification = "тактика окна: ждать либо таймаута, затем читать appliedVersion; результат await не важен")
     public long awaitAppliedChange(long since, long timeoutMs) throws InterruptedException {
         stateLock.lock();
         try {
@@ -143,6 +146,8 @@ public class ManagedPool implements DataSource, AutoCloseable {
      * Локальная конфигурация проверяется сразу — иначе неверный таймаут всплыл бы через событие
      * etcd и выглядел бы отказом провизёра, а не собственной ошибкой процесса.
      */
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "Spring-бин (DbProperties) разделяется контейнером по дизайну")
     public ManagedPool(DbProperties db, boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
             MechanismSpans spans) {
         this.db = db;
@@ -767,8 +772,21 @@ public class ManagedPool implements DataSource, AutoCloseable {
     }
 
     public enum Outcome { CREATED, RESIZED, RECREATED, CLOSED, UNCHANGED, REJECTED }
+    public record ApplyResult(Outcome outcome, List<String> changes, PoolSize size) {
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+                justification = "record-компоненты — контракт данных; явный канонический конструктор — рабочая "
+                        + "точка подавления (класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public ApplyResult {
+        }
 
-    public record ApplyResult(Outcome outcome, List<String> changes, PoolSize size) {}
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public List<String> changes() {
+            return changes;
+        }
+    }
 
     /** Срез состояния пула в конкретный момент. */
     public record Runtime(

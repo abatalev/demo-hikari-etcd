@@ -373,9 +373,9 @@ door-config: ## проверить конфигурацию двери сигн�
 		validate --config=/etc/otel/collector.yaml
 
 .PHONY: test
-test: ## юнит-тесты сервиса и провизора, проверка правил, конфигурации и состава (нужен поднятый стенд)
-	cd service && mvn -B -q test
-	cd provisioner && mvn -B -q test
+test: ## юнит-тесты сервиса и провизора, статический анализ, проверка правил, конфигурации и состава (нужен поднятый стенд)
+	cd service && mvn -B -q verify
+	cd provisioner && mvn -B -q verify
 	@$(MAKE) --no-print-directory check-silence
 	@$(MAKE) --no-print-directory check-instances
 	@$(MAKE) --no-print-directory door-config

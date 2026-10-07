@@ -1,5 +1,6 @@
 package com.abatalev.demo.etcdhikari.service.etcd;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -45,7 +46,21 @@ public final class EtcdKeys {
     }
 
     /** Размер пула + список ключей, которые не удалось прочитать (ключ -> причина). */
-    public static record Parsed(PoolSize size, Map<String, String> problems) {}
+    public static record Parsed(PoolSize size, Map<String, String> problems) {
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+                justification = "record-компоненты — контракт данных; явный канонический конструктор — рабочая "
+                        + "точка подавления (класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public Parsed {
+        }
+
+        @Override
+        @SuppressFBWarnings(value = "EI_EXPOSE_REP",
+                justification = "record-компоненты — контракт данных; явный акцессор — рабочая точка подавления "
+                        + "(класс-аннотация на record даёт US_USELESS_SUPPRESSION_ON_CLASS, spotbugs 4.9.3)")
+        public Map<String, String> problems() {
+            return problems;
+        }
+    }
 
     /** Неизвестные ключи (опечатки и снятые настройки) — возвращаем, чтобы залогировать один раз. */
     public static Set<String> unknownKeys(Map<String, String> fullKeys, String prefix) {

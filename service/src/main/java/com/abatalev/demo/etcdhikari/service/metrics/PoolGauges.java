@@ -3,6 +3,7 @@ package com.abatalev.demo.etcdhikari.service.metrics;
 import com.abatalev.demo.etcdhikari.service.etcd.EtcdPoolConfigSource;
 import com.abatalev.demo.etcdhikari.service.pool.PoolSize;
 import com.abatalev.demo.etcdhikari.service.pool.ManagedPool;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -54,6 +55,8 @@ public class PoolGauges {
      */
     private final List<Object> gaugeStates = new ArrayList<>();
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "бин (MeterRegistry, ManagedPool) разделяется контейнером по дизайну")
     public PoolGauges(MeterRegistry registry, ManagedPool pool, EtcdPoolConfigSource source) {
         this.pool = pool;
         this.source = source;
@@ -86,9 +89,16 @@ public class PoolGauges {
 
         // Применённая конфигурация: по ней виден целевой потолок, даже когда пул уже снят.
         gauge(registry, "pool.config.maximum_pool_size", "применённый потолок из конфигурации etcd",
-                () -> size() == null ? 0 : size().maximumPoolSize());
+                () -> {
+                    PoolSize s = size();
+                    // Обе ветки Integer: тернарник int/Integer распаковал бы и упаковал обратно.
+                    return s == null ? Integer.valueOf(0) : s.maximumPoolSize();
+                });
         gauge(registry, "pool.config.minimum_idle", "применённый минимум idle из конфигурации etcd",
-                () -> size() == null ? 0 : size().minimumIdle());
+                () -> {
+                    PoolSize s = size();
+                    return s == null ? Integer.valueOf(0) : s.minimumIdle();
+                });
         // Таймаут ожидания соединения из etcd не приходит: это локальное значение процесса.
         gauge(registry, "pool.config.connection_timeout_ms", "таймаут ожидания соединения из локальной конфигурации, мс",
                 () -> pool.connectionTimeoutMs());
