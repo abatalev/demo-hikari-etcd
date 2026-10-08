@@ -1,7 +1,7 @@
 package com.abatalev.demo.etcdhikari.service;
 
-import com.abatalev.demo.etcdhikari.service.config.DbProperties;
-import com.abatalev.demo.etcdhikari.service.config.EtcdProperties;
+import com.abatalev.demo.etcdhikari.service.management.config.DbProperties;
+import com.abatalev.demo.etcdhikari.service.management.config.EtcdProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
