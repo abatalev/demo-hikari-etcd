@@ -27,13 +27,17 @@ public class PoolBeansConfiguration {
      */
     @Bean(destroyMethod = "close")
     @Primary
-    ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans) {
+    ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans,
+            org.springframework.core.env.Environment env) {
+        boolean etcdEnabled = env.getProperty("pool.etcd.enabled", Boolean.class, true);
+        boolean initializeFromStatic = !etcdEnabled;
         return new ManagedPool(
                 properties,
                 properties.isEagerFillOnResize(),
                 properties.getDrainOnRecreateTimeout(),
                 counters,
-                spans);
+                spans,
+                initializeFromStatic);
     }
 
     @Bean

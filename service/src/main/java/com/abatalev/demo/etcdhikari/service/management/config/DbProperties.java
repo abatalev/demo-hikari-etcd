@@ -63,6 +63,16 @@ public class DbProperties {
     private boolean registerMbeans = true;
 
     /**
+     * Статический размер пула (используется при pool.etcd.enabled=false).
+     */
+    private Integer maximumPoolSize = 10;
+
+    /**
+     * Статический минимум idle-соединений (используется при pool.etcd.enabled=false).
+     */
+    private Integer minimumIdle = 10;
+
+    /**
      * Проверка локальной конфигурации. Жёсткие нарушения -> исключение (контекст падает на старте:
      * молчаливое применение неверного таймаута хуже, чем отказ подняться). Мягкие -> предупреждения
      * для журнала.
@@ -267,5 +277,21 @@ public class DbProperties {
     }
     public void setRegisterMbeans(boolean registerMbeans) {
         this.registerMbeans = registerMbeans;
+    }
+
+    public Integer getMaximumPoolSize() {
+        return maximumPoolSize;
+    }
+
+    public void setMaximumPoolSize(Integer maximumPoolSize) {
+        this.maximumPoolSize = maximumPoolSize;
+    }
+
+    public Integer getMinimumIdle() {
+        return minimumIdle;
+    }
+
+    public void setMinimumIdle(Integer minimumIdle) {
+        this.minimumIdle = minimumIdle;
     }
 }

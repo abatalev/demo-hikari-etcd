@@ -161,6 +161,38 @@ public class ManagedPool implements DataSource, AutoCloseable {
         lastReason.set("startup: пула нет (ждём конфигурацию из etcd)");
     }
 
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
+            justification = "Spring-бин (DbProperties) разделяется контейнером по дизайну")
+    public ManagedPool(DbProperties db, boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
+            MechanismSpans spans, boolean initializeFromStatic) {
+        this.db = db;
+        this.eagerFillOnResize = eagerFillOnResize;
+        this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
+        this.counters = counters;
+        this.spans = spans == null ? MechanismSpans.NOOP : spans;
+        this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
+        db.validate().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
+        if (initializeFromStatic) {
+            try {
+                Integer max = db.getMaximumPoolSize();
+                Integer min = db.getMinimumIdle();
+                if (max == null) {
+                    max = min == null ? 10 : min;
+                }
+                if (min == null) {
+                    min = max;
+                }
+                PoolSize size = new PoolSize(max, min);
+                apply(size, "startup: static config");
+                return;
+            } catch (Exception e) {
+                throw new IllegalStateException("не удалось инициализировать пул из статической конфигурации: " + e.getMessage(), e);
+            }
+        }
+        log.info("размер пула приходит только из etcd: локального размера нет, пул не создан");
+        lastReason.set("startup: пула нет (ждём конфигурацию из etcd)");
+    }
+
     /**
      * Применяет новый конфиг.
      *
