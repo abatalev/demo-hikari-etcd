@@ -3,13 +3,14 @@ package com.abatalev.demo.etcdhikari.service.management.etcd;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.options.PutOption;
+import io.micrometer.common.KeyValue;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.abatalev.demo.etcdhikari.service.management.config.EtcdProperties;
-import com.abatalev.demo.etcdhikari.service.management.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.service.management.otel.MechanismObservation;
 import com.abatalev.demo.etcdhikari.service.management.pool.ManagedPool;
 
 /**
@@ -34,11 +35,11 @@ final class UnreleasedShrinkPublisher {
 
     private final ManagedPool pool;
     private final EtcdProperties properties;
-    private final MechanismSpans spans;
+    private final MechanismObservation spans;
     private final EtcdShared shared;
     private final String unreleasedPath;
 
-    UnreleasedShrinkPublisher(ManagedPool pool, EtcdProperties properties, MechanismSpans spans,
+    UnreleasedShrinkPublisher(ManagedPool pool, EtcdProperties properties, MechanismObservation spans,
             EtcdShared shared, String unreleasedPath) {
         this.pool = pool;
         this.properties = properties;
@@ -135,13 +136,14 @@ final class UnreleasedShrinkPublisher {
         try {
             // Событие механизма: запись величины, которой провижёр ждёт, чтобы перераспределить
             // место. По трассе видно, что место освобождается и сколько раз публикация стоила.
-            spans.run("etcd.drain_debt.publish", b -> b
-                    .setAttribute("etcd.key", unreleasedPath)
-                    .setAttribute("etcd.value", value)
-                    .setAttribute("pool.debt", debt)
-                    .setAttribute("pool.max", pool.runtime().maximumPoolSize())
-                    .setAttribute("pool.total", pool.runtime().total())
-                    .setAttribute("etcd.lease", lease),
+            spans.run("etcd.drain_debt.publish", o -> o
+                    .lowCardinalityKeyValue(KeyValue.of("etcd.key", unreleasedPath))
+                    .lowCardinalityKeyValue(KeyValue.of("etcd.value", Integer.toString(value)))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.debt", Integer.toString(debt)))
+                    .lowCardinalityKeyValue(
+                            KeyValue.of("pool.max", Integer.toString(pool.runtime().maximumPoolSize())))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.total", Integer.toString(pool.runtime().total())))
+                    .lowCardinalityKeyValue(KeyValue.of("etcd.lease", Long.toString(lease))),
                     () -> c.getKVClient()
                             .put(
                                     ByteSequence.from(unreleasedPath, StandardCharsets.UTF_8),

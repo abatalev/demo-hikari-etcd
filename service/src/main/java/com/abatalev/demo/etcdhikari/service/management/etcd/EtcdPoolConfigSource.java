@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 
 import com.abatalev.demo.etcdhikari.service.management.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.management.metrics.PoolCounters;
-import com.abatalev.demo.etcdhikari.service.management.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.service.management.otel.MechanismObservation;
 import com.abatalev.demo.etcdhikari.service.management.pool.ManagedPool;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
@@ -44,7 +44,7 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
 
     private final ManagedPool pool;
     private final EtcdProperties properties;
-    private final MechanismSpans spans;
+    private final MechanismObservation spans;
     /** Путь ключей этого экземпляра; null, когда источник выключен. */
     private final String path;
 
@@ -60,10 +60,10 @@ public class EtcdPoolConfigSource implements SmartLifecycle {
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
             justification = "Spring-бины (ManagedPool, EtcdProperties) разделяются контейнером по дизайну")
     public EtcdPoolConfigSource(ManagedPool pool, EtcdProperties properties,
-            ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismSpans spans) {
+            ApplicationEventPublisher eventPublisher, PoolCounters counters, MechanismObservation spans) {
         this.pool = pool;
         this.properties = properties;
-        this.spans = spans == null ? MechanismSpans.NOOP : spans;
+        this.spans = spans == null ? MechanismObservation.NOOP : spans;
         String nodePath;
         String unreleasedPath;
         if (properties.isEnabled()) {

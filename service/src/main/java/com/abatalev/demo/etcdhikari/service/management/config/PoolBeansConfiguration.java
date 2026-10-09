@@ -1,7 +1,7 @@
 package com.abatalev.demo.etcdhikari.service.management.config;
 
 import com.abatalev.demo.etcdhikari.service.management.metrics.PoolCounters;
-import com.abatalev.demo.etcdhikari.service.management.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.service.management.otel.MechanismObservation;
 import com.abatalev.demo.etcdhikari.service.management.pool.ManagedPool;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
@@ -27,7 +27,7 @@ public class PoolBeansConfiguration {
      */
     @Bean(destroyMethod = "close")
     @Primary
-    ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismSpans spans,
+    ManagedPool managedPool(DbProperties properties, PoolCounters counters, MechanismObservation spans,
             org.springframework.core.env.Environment env) {
         boolean etcdEnabled = env.getProperty("pool.etcd.enabled", Boolean.class, true);
         boolean initializeFromStatic = !etcdEnabled;

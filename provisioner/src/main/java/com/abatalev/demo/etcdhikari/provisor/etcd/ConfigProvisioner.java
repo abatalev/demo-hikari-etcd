@@ -2,7 +2,7 @@ package com.abatalev.demo.etcdhikari.provisor.etcd;
 
 import com.abatalev.demo.etcdhikari.provisor.config.ProvisionerProperties;
 import com.abatalev.demo.etcdhikari.provisor.metrics.ProvisionerMetrics;
-import com.abatalev.demo.etcdhikari.provisor.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.provisor.otel.MechanismObservation;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
@@ -68,7 +68,7 @@ public class ConfigProvisioner implements SmartLifecycle {
 
     private final ProvisionerProperties properties;
     private final ProvisionerMetrics metrics;
-    private final MechanismSpans spans;
+    private final MechanismObservation spans;
 
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicReference<Client> clientRef = new AtomicReference<>();
@@ -92,10 +92,10 @@ public class ConfigProvisioner implements SmartLifecycle {
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
             justification = "Spring-бины (ProvisionerProperties, ProvisionerMetrics) разделяются контейнером по дизайну")
     public ConfigProvisioner(ProvisionerProperties properties, ProvisionerMetrics metrics,
-            MechanismSpans spans) {
+            MechanismObservation spans) {
         this.properties = properties;
         this.metrics = metrics;
-        this.spans = spans == null ? MechanismSpans.NOOP : spans;
+        this.spans = spans == null ? MechanismObservation.NOOP : spans;
         this.replicaName = properties.resolveName();
         String root = InstanceKey.normalizedRoot(properties.getRoot());
         this.servicesPrefix = root + "/services/";
@@ -320,18 +320,21 @@ public class ConfigProvisioner implements SmartLifecycle {
                     candidateKey(service, lease));
             // Событие механизма — только о переходе, а не о каждом поллинге: выборы идут раз в
             // секунду, и след каждого холостого сравнения в трассах только шумел бы.
-            spans.event("provisioner.election.won", b -> b
-                    .setAttribute("service", service)
-                    .setAttribute("election.lease", lease)
-                    .setAttribute("election.candidates", kvs.size()));
+            spans.event("provisioner.election.won", o -> o
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("service", service))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("election.lease", Long.toString(lease)))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("election.candidates",
+                            Integer.toString(kvs.size()))));
         } else if (!mine && Boolean.TRUE.equals(prev)) {
             log.info("реплика {} потеряла лидерство сервиса {} (ведёт lease {})", replicaName,
                     service, kvs.isEmpty() ? "нет" : kvs.get(0).getLease());
-            spans.event("provisioner.election.lost", b -> b
-                    .setAttribute("service", service)
-                    .setAttribute("election.lease", lease)
-                    .setAttribute("election.candidates", kvs.size())
-                    .setAttribute("election.leader_lease", kvs.isEmpty() ? 0L : kvs.get(0).getLease()));
+            spans.event("provisioner.election.lost", o -> o
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("service", service))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("election.lease", Long.toString(lease)))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("election.candidates",
+                            Integer.toString(kvs.size())))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("election.leader_lease",
+                            Long.toString(kvs.isEmpty() ? 0L : kvs.get(0).getLease()))));
         }
         leaderState.put(service, mine);
         // Ряд лидерства есть у обеих реплик: по метрикам видно, кто вёл сервис, даже когда
@@ -436,7 +439,7 @@ public class ConfigProvisioner implements SmartLifecycle {
     }
 
     /** Трассы событий механизма; воркер размечает ими свои решения и записи. */
-    MechanismSpans mechanism() {
+    MechanismObservation mechanism() {
         return spans;
     }
 

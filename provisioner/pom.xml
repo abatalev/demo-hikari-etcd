@@ -71,6 +71,14 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- InMemorySpanExporter для тестов моста Observation -> OTel: проверяем, что признаки,
+             добавленные в контекст наблюдения после start(), доезжают до готового спана. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Точечные подавления SpotBugs с обоснованием; в рантайм не входит. -->
         <dependency>
             <groupId>com.github.spotbugs</groupId>

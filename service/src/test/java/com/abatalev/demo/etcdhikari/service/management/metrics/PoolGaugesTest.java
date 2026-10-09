@@ -6,7 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import com.abatalev.demo.etcdhikari.service.management.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.management.config.EtcdProperties;
 import com.abatalev.demo.etcdhikari.service.management.etcd.EtcdPoolConfigSource;
-import com.abatalev.demo.etcdhikari.service.management.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.service.management.otel.MechanismObservation;
 import com.abatalev.demo.etcdhikari.service.management.pool.ManagedPool;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
@@ -29,7 +29,7 @@ class PoolGaugesTest {
     private static final String SECRET = "parol-ne-v-metrikah";
 
     private ManagedPool poolWithoutConfig(DbProperties db, PoolCounters counters) {
-        return new ManagedPool(db, false, Duration.ZERO, counters, MechanismSpans.NOOP);
+        return new ManagedPool(db, false, Duration.ZERO, counters, MechanismObservation.NOOP);
     }
 
     /** Пароль задаём везде: он не должен просочиться ни в один ряд ни в одном состоянии пула. */
@@ -42,7 +42,7 @@ class PoolGaugesTest {
     private EtcdPoolConfigSource disabledSource(ManagedPool pool, PoolCounters counters) {
         EtcdProperties etcd = new EtcdProperties();
         etcd.setEnabled(false);
-        return new EtcdPoolConfigSource(pool, etcd, event -> {}, counters, MechanismSpans.NOOP);
+        return new EtcdPoolConfigSource(pool, etcd, event -> {}, counters, MechanismObservation.NOOP);
     }
 
     @Test

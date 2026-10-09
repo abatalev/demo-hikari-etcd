@@ -31,7 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.abatalev.demo.etcdhikari.provisor.metrics.ProvisionerMetrics;
-import com.abatalev.demo.etcdhikari.provisor.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.provisor.otel.MechanismObservation;
 
 /**
  * Воркер провижининга одного сервиса: держит инвариант «ключи конфигурации инстанса существуют
@@ -358,16 +358,25 @@ final class ProvisioningWorker implements Runnable {
     private void provision(Client c, Tree tree, boolean full) throws Exception {
         // Событие механизма на весь пересчёт: состав, распределение и записи — одна операция. По
         // журналу видно, что решил провижёр; по трассе — как принималось решение и чем кончилось.
-        try (MechanismSpans.Event event = owner.mechanism().start("provisioner.fleet.recompute", b -> b
-                .setAttribute("service", service)
-                .setAttribute("fleet.full", full)
-                .setAttribute("fleet.revision", tree.revision)
-                .setAttribute("fleet.nodes", tree.nodes.size()))) {
-            provisionWithin(c, tree, full, event);
+        try (MechanismObservation.Event event = owner.mechanism().start("provisioner.fleet.recompute", o -> o
+                .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("service", service))
+                .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("fleet.full", Boolean.toString(full)))
+                .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("fleet.revision", Long.toString(tree.revision)))
+                .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("fleet.nodes",
+                        Integer.toString(tree.nodes.size()))))) {
+            try {
+                provisionWithin(c, tree, full, event);
+            } catch (Exception | Error e) {
+                // Провал пересчёта виден в трассе (ERROR), а не только в журнале: у трассы и журнала
+                // общий идентификатор. Маркировка — до close(): ресурс try-with-resources закрывается
+                // раньше catch, и у завершённого спана статус уже не изменить.
+                event.failure(e);
+                throw e;
+            }
         }
     }
 
-    private void provisionWithin(Client c, Tree tree, boolean full, MechanismSpans.Event event)
+    private void provisionWithin(Client c, Tree tree, boolean full, MechanismObservation.Event event)
             throws Exception {
         Integer budget = budgetValue(c, InstanceKey.ACTIVE_MAX_CONNECTIONS,
                 owner.properties().getActiveMaxConnections(), tree, full);
@@ -563,7 +572,7 @@ final class ProvisioningWorker implements Runnable {
      * <p>В трассе оно обязано отличаться от «применено»: иначе пересчёт, о котором в журнале
      * написано «распределение не выполнено», в трассах читался бы как обычная работа флота.
      */
-    private void refuse(MechanismSpans.Event event, String reason) {
+    private void refuse(MechanismObservation.Event event, String reason) {
         event.note("fleet.outcome", "отказ");
         event.note("fleet.refusal", reason);
     }
@@ -767,11 +776,13 @@ final class ProvisioningWorker implements Runnable {
             log.info("пересчёт: {} maximumPoolSize={}", hikariPrefix, size);
             // Событие механизма только о состоявшейся записи: приказ, равный текущему значению,
             // ключа не меняет, и след такого «решения» в трассах был бы пустым.
-            owner.mechanism().event("etcd.fleet.write.ceiling", b -> b
-                    .setAttribute("service", service)
-                    .setAttribute("node", instance)
-                    .setAttribute("etcd.key", key.toString(StandardCharsets.UTF_8))
-                    .setAttribute("pool.max", Long.parseLong(size)));
+            owner.mechanism().event("etcd.fleet.write.ceiling", o -> o
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("service", service))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("node", instance))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("etcd.key",
+                            key.toString(StandardCharsets.UTF_8)))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("pool.max",
+                            Long.toString(Long.parseLong(size)))));
             return 1;
         }
         log.debug("пересчёт: {} maximumPoolSize уже {}", hikariPrefix, size);
@@ -788,13 +799,14 @@ final class ProvisioningWorker implements Runnable {
         if (deleted > 0) {
             owner.metrics().prefixWipe();
             log.info("очистка: удалено {} ключей префикса {}", deleted, hikariPrefix);
-            owner.mechanism().event("etcd.fleet.wipe", b -> b
-                    .setAttribute("service", service)
+            owner.mechanism().event("etcd.fleet.wipe", o -> o
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("service", service))
                     // Префикс разбираем, а не ищем по узлам: у осиротевшего префикса узла уже нет,
                     // и имя инстанса для события берётся из самого пути.
-                    .setAttribute("node", instanceOf(hikariPrefix))
-                    .setAttribute("etcd.prefix", hikariPrefix)
-                    .setAttribute("etcd.deleted", deleted));
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("node", instanceOf(hikariPrefix)))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("etcd.prefix", hikariPrefix))
+                    .lowCardinalityKeyValue(io.micrometer.common.KeyValue.of("etcd.deleted",
+                            Long.toString(deleted))));
         }
     }
 

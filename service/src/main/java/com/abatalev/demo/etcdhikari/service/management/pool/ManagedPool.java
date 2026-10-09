@@ -4,7 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariConfigMXBean;
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.HikariPoolMXBean;
-import io.opentelemetry.api.common.AttributeKey;
+import io.micrometer.common.KeyValue;
 import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
 import com.abatalev.demo.etcdhikari.service.management.config.DbProperties;
 import com.abatalev.demo.etcdhikari.service.management.metrics.HikariEventMetrics;
 import com.abatalev.demo.etcdhikari.service.management.metrics.PoolCounters;
-import com.abatalev.demo.etcdhikari.service.management.otel.MechanismSpans;
+import com.abatalev.demo.etcdhikari.service.management.otel.MechanismObservation;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
@@ -74,7 +74,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
     private final HikariEventMetrics eventMetrics;
 
     /** Трассы событий механизма; NOOP — наблюдение выключено. */
-    private final MechanismSpans spans;
+    private final MechanismObservation spans;
 
     private final AtomicReference<HikariDataSource> dataSource = new AtomicReference<>();
     private final AtomicReference<PoolSize> applied = new AtomicReference<>();
@@ -149,27 +149,28 @@ public class ManagedPool implements DataSource, AutoCloseable {
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
             justification = "Spring-бин (DbProperties) разделяется контейнером по дизайну")
     public ManagedPool(DbProperties db, boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
-            MechanismSpans spans) {
+            MechanismObservation spans) {
         this.db = db;
         this.eagerFillOnResize = eagerFillOnResize;
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
         this.counters = counters;
-        this.spans = spans == null ? MechanismSpans.NOOP : spans;
+        this.spans = spans == null ? MechanismObservation.NOOP : spans;
         this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
         db.validate().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
         log.info("размер пула приходит только из etcd: локального размера нет, пул не создан");
         lastReason.set("startup: пула нет (ждём конфигурацию из etcd)");
     }
 
-    @SuppressFBWarnings(value = "EI_EXPOSE_REP2",
-            justification = "Spring-бин (DbProperties) разделяется контейнером по дизайну")
+    @SuppressFBWarnings(value = {"EI_EXPOSE_REP2", "CT_CONSTRUCTOR_THROW"},
+            justification = "Spring-бин (DbProperties) разделяется контейнером по дизайну; жёсткий "
+                    + "отказ на старте при неверной статической конфигурации осознан, finalize у пула нет")
     public ManagedPool(DbProperties db, boolean eagerFillOnResize, Duration drainTimeout, PoolCounters counters,
-            MechanismSpans spans, boolean initializeFromStatic) {
+            MechanismObservation spans, boolean initializeFromStatic) {
         this.db = db;
         this.eagerFillOnResize = eagerFillOnResize;
         this.drainTimeout = drainTimeout == null ? Duration.ZERO : drainTimeout;
         this.counters = counters;
-        this.spans = spans == null ? MechanismSpans.NOOP : spans;
+        this.spans = spans == null ? MechanismObservation.NOOP : spans;
         this.eventMetrics = counters == null ? null : new HikariEventMetrics(counters.registry());
         db.validate().forEach(w -> log.warn("[startup] нормализация конфига: {}", w));
         if (initializeFromStatic) {
@@ -177,7 +178,7 @@ public class ManagedPool implements DataSource, AutoCloseable {
                 Integer max = db.getMaximumPoolSize();
                 Integer min = db.getMinimumIdle();
                 if (max == null) {
-                    max = min == null ? 10 : min;
+                    max = min != null ? min : 10;
                 }
                 if (min == null) {
                     min = max;
@@ -204,26 +205,27 @@ public class ManagedPool implements DataSource, AutoCloseable {
             // значения и есть событие. Размер nullable, поэтому «не задано» пишется как UNSET (-1):
             // ноль у него означает «пул снят», а не «не задано», и смешивать эти два смысла в признаке
             // нельзя. Разыменование null здесь уронило бы apply() целиком — пул не создаётся.
-            return spans.callQuietly("pool.config.apply", b -> b
-                    .setAttribute("config.reason", reason)
-                    .setAttribute("pool.generation", generation.get())
-                    .setAttribute("pool.max.requested", orUnset(desired.maximumPoolSize()))
-                    .setAttribute("pool.min_idle.requested", orUnset(desired.minimumIdle()))
+            return spans.callQuietly("pool.config.apply", o -> o
+                    .lowCardinalityKeyValue(KeyValue.of("config.reason", reason))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.generation", Long.toString(generation.get())))
+                    .lowCardinalityKeyValue(
+                            KeyValue.of("pool.max.requested", Integer.toString(orUnset(desired.maximumPoolSize()))))
+                    .lowCardinalityKeyValue(
+                            KeyValue.of("pool.min_idle.requested", Integer.toString(orUnset(desired.minimumIdle()))))
                     // Прежний размер — тоже часть события: по требованию спеки переход виден в трассе
                     // как «было -> стало», без обращения к журналу за второй половиной пары.
-                    .setAttribute("pool.max.before", maxBefore())
-                    .setAttribute("pool.min_idle.before", minIdleBefore()),
-                    span -> {
+                    .lowCardinalityKeyValue(KeyValue.of("pool.max.before", Integer.toString(maxBefore())))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.min_idle.before", Integer.toString(minIdleBefore()))),
+                    event -> {
                         ApplyResult result = applyInternal(desired, reason);
-                        // Итог дописывается в тот же span: решение и его исход — одно событие,
+                        // Итог дописывается в то же событие: решение и его исход — одно событие,
                         // и по журналу видно ровно то же, что по трассе.
-                        span.setAttribute("config.outcome", result.outcome().name());
-                        span.setAttribute(AttributeKey.stringArrayKey("config.changes"),
-                                result.changes());
+                        event.note("config.outcome", result.outcome().name());
+                        event.note("config.changes", String.join(",", result.changes()));
                         PoolSize now = result.size();
-                        span.setAttribute("pool.max.after", now == null ? 0 : now.maximumPoolSize());
-                        span.setAttribute("pool.min_idle.after", now == null ? 0 : now.minimumIdle());
-                        span.setAttribute("pool.generation.after", generation.get());
+                        event.note("pool.max.after", now == null ? 0 : now.maximumPoolSize());
+                        event.note("pool.min_idle.after", now == null ? 0 : now.minimumIdle());
+                        event.note("pool.generation.after", generation.get());
                         return result;
                     });
         } finally {
@@ -505,15 +507,28 @@ public class ManagedPool implements DataSource, AutoCloseable {
      */
     private void create(PoolSize size, String reason, boolean recreation) {
         int previousGeneration = generation.get();
-        spans.runQuietly(recreation ? "pool.recreate" : "pool.create", b -> b
-                .setAttribute("config.reason", reason)
-                .setAttribute("pool.name", db.getPoolName())
-                .setAttribute("pool.max", size.maximumPoolSize())
-                .setAttribute("pool.min_idle", size.minimumIdle())
-                .setAttribute("pool.generation.from", previousGeneration)
-                .setAttribute("pool.generation.to", previousGeneration + 1)
-                .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
-                () -> createPool(size, reason, recreation));
+        // Открытое событие с телом в inner try/catch: маркировка ERROR обязана случиться до
+        // close() — ресурс try-with-resources закрывается раньше catch, и у завершённого спана
+        // статус не изменить. `run(...)` тут не подходит: он декларирует throws Exception, а
+        // create() вызывается из лямбды Function внутри callQuietly, где проверяемое не пройти.
+        try (MechanismObservation.Event event = spans.start(recreation ? "pool.recreate" : "pool.create",
+                o -> o
+                        .lowCardinalityKeyValue(KeyValue.of("config.reason", reason))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.name", db.getPoolName()))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.max", Integer.toString(size.maximumPoolSize())))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.min_idle", Integer.toString(size.minimumIdle())))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.generation.from", Integer.toString(previousGeneration)))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.generation.to", Integer.toString(previousGeneration + 1)))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.drain.timeout_ms", Long.toString(drainTimeout.toMillis()))))) {
+            try {
+                createPool(size, reason, recreation);
+            } catch (RuntimeException | Error e) {
+                // Провал создания виден в трассе (ERROR), а не только в журнале: у трассы и журнала
+                // общий идентификатор. Наружу ошибка идёт как была — наблюдение не меняет поведения.
+                event.failure(e);
+                throw e;
+            }
+        }
     }
 
     private void createPool(PoolSize size, String reason, boolean recreation) {
@@ -581,12 +596,13 @@ public class ManagedPool implements DataSource, AutoCloseable {
             int active = pool.getActiveConnections();
             log.info("старый пул '{}' закрывается: ждём {} активных соединений (до {})",
                     ds.getPoolName(), active, drainTimeout);
-            spans.callQuietly("pool.drain", b -> b
-                    .setAttribute("pool.name", ds.getPoolName())
-                    .setAttribute("pool.drain.cause", cause)
-                    .setAttribute("pool.drain.active", active)
-                    .setAttribute("pool.drain.timeout_ms", drainTimeout.toMillis()),
-                    span -> {
+            spans.callQuietly("pool.drain", o -> o
+                    .lowCardinalityKeyValue(KeyValue.of("pool.name", ds.getPoolName()))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.drain.cause", cause))
+                    .lowCardinalityKeyValue(KeyValue.of("pool.drain.active", Integer.toString(active)))
+                    .lowCardinalityKeyValue(
+                            KeyValue.of("pool.drain.timeout_ms", Long.toString(drainTimeout.toMillis()))),
+                    event -> {
                         try {
                             pool.softEvictConnections();
                             long deadline = System.nanoTime() + drainTimeout.toNanos();
@@ -594,8 +610,8 @@ public class ManagedPool implements DataSource, AutoCloseable {
                                 Thread.sleep(20);
                             }
                             int left = pool.getActiveConnections();
-                            span.setAttribute("pool.drain.left", left);
-                            span.setAttribute("pool.drain.timed_out", left > 0);
+                            event.note("pool.drain.left", left);
+                            event.note("pool.drain.timed_out", left > 0);
                             if (left > 0) {
                                 log.warn("{} активных соединений не успели доработать за {} — закрываем принудительно",
                                         left, drainTimeout);
@@ -718,13 +734,19 @@ public class ManagedPool implements DataSource, AutoCloseable {
         } finally {
             long waitedMs = (System.nanoTime() - startNanos) / 1_000_000;
             if (waitedMs >= ACQUIRE_TRACE_MIN_WAIT_MS) {
-                spans.event("pool.acquire.wait", b -> b
-                        .setAttribute("pool.name", ds.getPoolName())
-                        .setAttribute("pool.acquire.wait_ms", waitedMs)
-                        .setAttribute("pool.acquire.threads_awaiting", awaitingBefore)
-                        .setAttribute("pool.acquire.max", ds.getMaximumPoolSize())
-                        .setAttribute("pool.acquire.total", ds.getHikariPoolMXBean().getTotalConnections())
-                        .setAttribute("pool.acquire.idle", ds.getHikariPoolMXBean().getIdleConnections()));
+                spans.event("pool.acquire.wait", o -> o
+                        .lowCardinalityKeyValue(KeyValue.of("pool.name", ds.getPoolName()))
+                        .lowCardinalityKeyValue(KeyValue.of("pool.acquire.wait_ms", Long.toString(waitedMs)))
+                        .lowCardinalityKeyValue(
+                                KeyValue.of("pool.acquire.threads_awaiting", Integer.toString(awaitingBefore)))
+                        .lowCardinalityKeyValue(
+                                KeyValue.of("pool.acquire.max", Integer.toString(ds.getMaximumPoolSize())))
+                        .lowCardinalityKeyValue(
+                                KeyValue.of("pool.acquire.total", Integer.toString(ds.getHikariPoolMXBean()
+                                        .getTotalConnections())))
+                        .lowCardinalityKeyValue(
+                                KeyValue.of("pool.acquire.idle", Integer.toString(ds.getHikariPoolMXBean()
+                                        .getIdleConnections()))));
             }
         }
     }
