@@ -17,6 +17,7 @@
 Схема и обзор — [README.md](README.md), подробности — в [docs/](docs/):
 [mechanism.md](docs/mechanism.md) (путь `put` → resize), [api.md](docs/api.md),
 [experiments.md](docs/experiments.md) (замеры), [operations.md](docs/operations.md) (troubleshooting).
+Термины домена — [glossary.md](docs/glossary.md).
 
 ## Спецификация: OpenSpec
 
